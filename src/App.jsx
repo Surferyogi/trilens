@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-14:14";
+const APP_VERSION = "v2026:07:02-15:51";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -171,6 +171,154 @@ function SectionHead({ label, title, desc }) {
   );
 }
 
+/* ---------- signal map chart (v2026:07:02-15:51) ----------
+   S&P 500 with 50d (blue) / 150d (green) SMAs and honestly-scoped historical bands:
+   - red band   = Lens 1 proxy: Sahm Rule >= 0.50 (FRED, from 1959)
+   - amber band = Lens 1 proxy: 10y-3m curve inverted (FRED, from 1982)
+   - red ribbon = Lens 3: 50d SMA below 150d SMA (computed from the closes)
+   Lens 2 has NO reconstructible free-data history — only today's live froth % is marked (gold dot).
+   Hand-rolled SVG on purpose: zero new npm dependencies. */
+const RANGES = ["6m", "1y", "5y", "all"];
+const idxFor = (dates, d) => {
+  if (d <= dates[0]) return 0;
+  if (d >= dates[dates.length - 1]) return dates.length - 1;
+  let lo = 0, hi = dates.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (dates[m] < d) lo = m + 1; else hi = m; }
+  return lo;
+};
+const MO = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function ChartSection({ frothPct }) {
+  const [range, setRange] = useState("1y");
+  const [cache, setCache] = useState({});
+  const cur = cache[range] || { status: "idle" };
+
+  useEffect(() => {
+    if (cache[range]) return;
+    setCache((p) => ({ ...p, [range]: { status: "loading" } }));
+    fetch(`${API}?chart=${range}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j) => setCache((p) => ({ ...p, [range]: j.error ? { status: "error", err: j.error } : { status: "done", data: j } })))
+      .catch((e) => setCache((p) => ({ ...p, [range]: { status: "error", err: e.message } })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range]);
+
+  const ch = cur.data?.chart;
+  const useLog = range === "5y" || range === "all";
+  const W = 820, H = 380, m = { l: 58, r: 16, t: 16, b: 46 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const ribbonY = H - m.b + 8, ribbonH = 6;
+
+  let svgBody = null, disclosure = null;
+  if (ch && ch.t.length > 1) {
+    const { t, c, s50, s150, bands } = ch;
+    const N = t.length;
+    const vals = [...c, ...s50.filter((x) => x != null), ...s150.filter((x) => x != null)];
+    const lo = Math.min(...vals) * 0.97, hi = Math.max(...vals) * 1.03;
+    const yPos = (v) => {
+      const f = useLog ? (Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo)) : (v - lo) / (hi - lo);
+      return m.t + (1 - f) * ph;
+    };
+    const xPos = (i) => m.l + (i / (N - 1)) * pw;
+    const path = (arr) => {
+      let d = "", pen = false;
+      for (let i = 0; i < N; i++) {
+        const v = arr[i];
+        if (v == null) { pen = false; continue; }
+        d += `${pen ? "L" : "M"}${xPos(i).toFixed(1)},${yPos(v).toFixed(1)}`;
+        pen = true;
+      }
+      return d;
+    };
+    const bandRects = (list, fill, opacity) =>
+      (list || []).filter((b) => !(b.b < t[0] || b.a > t[N - 1])).map((b, k) => {
+        const x1 = xPos(idxFor(t, b.a)), x2 = xPos(idxFor(t, b.b));
+        return <rect key={k} x={x1} y={m.t} width={Math.max(x2 - x1, 1.5)} height={ph} fill={fill} opacity={opacity} />;
+      });
+    const ribbonRects = (list) =>
+      (list || []).filter((b) => !(b.b < t[0] || b.a > t[N - 1])).map((b, k) => {
+        const x1 = xPos(idxFor(t, b.a)), x2 = xPos(idxFor(t, b.b));
+        return <rect key={k} x={x1} y={ribbonY} width={Math.max(x2 - x1, 1.5)} height={ribbonH} rx={1} fill={C.red} opacity={0.85} />;
+      });
+    const yTicks = useLog
+      ? [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 4000, 8000].filter((v) => v >= lo && v <= hi)
+      : Array.from({ length: 5 }, (_, i) => Math.round(lo + (i * (hi - lo)) / 4));
+    const xTickIdx = Array.from({ length: 6 }, (_, i) => Math.round((i * (N - 1)) / 5));
+    const xLabel = (d) => (range === "5y" || range === "all") ? d.slice(0, 4) : `${MO[+d.slice(5, 7) - 1]} '${d.slice(2, 4)}`;
+
+    svgBody = (
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="S&P 500 signal map">
+        {bandRects(bands.lens1_curve, C.amber, 0.10)}
+        {bandRects(bands.lens1_sahm, C.red, 0.14)}
+        {yTicks.map((v, k) => (
+          <g key={k}>
+            <line x1={m.l} x2={W - m.r} y1={yPos(v)} y2={yPos(v)} stroke={C.line} strokeWidth="0.6" />
+            <text x={m.l - 8} y={yPos(v) + 3.5} textAnchor="end" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{v.toLocaleString()}</text>
+          </g>
+        ))}
+        {xTickIdx.map((i, k) => (
+          <text key={k} x={xPos(i)} y={H - m.b + 30} textAnchor="middle" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{xLabel(t[i])}</text>
+        ))}
+        {ribbonRects(bands.lens3_break)}
+        <text x={m.l} y={ribbonY + ribbonH + 12} fontSize="8.5" fill={C.faint} fontFamily={MONO}>LENS 3: 50d below 150d</text>
+        <path d={path(s150)} fill="none" stroke={C.green} strokeWidth="1.6" />
+        <path d={path(s50)} fill="none" stroke={C.blue} strokeWidth="1.6" />
+        <path d={path(c)} fill="none" stroke={C.text} strokeWidth="1.8" />
+        <circle cx={xPos(N - 1)} cy={yPos(c[N - 1])} r="4.5" fill={C.gold} stroke="#141005" strokeWidth="1.5" />
+        <text x={xPos(N - 1) - 8} y={yPos(c[N - 1]) - 10} textAnchor="end" fontSize="10.5" fill={C.gold} fontFamily={MONO}>
+          Lens 2 now: {frothPct === null ? "—" : `${frothPct}% triggered`}
+        </text>
+      </svg>
+    );
+    disclosure = (
+      <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.faint, marginTop: 8, lineHeight: 1.7 }}>
+        {useLog ? "log scale" : "linear scale"} · {ch.sampled} · src: Yahoo Finance ^GSPC (prices from {ch.coverage.px_from}, SMAs computed on daily closes) + FRED (Sahm from {ch.coverage.sahm_from ?? "n/a"}, 10y−3m from {ch.coverage.curve_from ?? "n/a"})
+        <br />
+        Lens 1 bands are a disclosed 2-of-7 PROXY (Sahm ≥ 0.50 red · curve inverted amber), not the full 7-gauge dashboard. Lens 2 has no reconstructible free-data history — only today's live reading is marked. Band legibility: runs &lt;5 obs dropped, gaps ≤10 obs merged.
+        {ch.errors?.length > 0 && <span style={{ color: C.amber }}> · warnings: {ch.errors.join(" · ")}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <SectionHead label="Signal Map" title="Where the lenses fired, on the chart" desc="S&P 500 with 50-day (blue) and 150-day (green) moving averages, plus honestly-reconstructible historical signals." />
+      <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 14px 10px" }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+          {RANGES.map((r) => (
+            <button key={r} onClick={() => setRange(r)}
+              style={{ background: range === r ? C.gold : "transparent", color: range === r ? "#141005" : C.mute, border: `1px solid ${range === r ? C.gold : C.line}`, borderRadius: 6, padding: "5px 14px", fontFamily: MONO, fontSize: 11.5, fontWeight: 600, cursor: "pointer", letterSpacing: 1 }}>
+              {r.toUpperCase()}
+            </button>
+          ))}
+          <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", fontFamily: MONO, fontSize: 9.5, color: C.mute }}>
+            <span><span style={{ color: C.text }}>—</span> S&amp;P 500</span>
+            <span><span style={{ color: C.blue }}>—</span> 50d SMA</span>
+            <span><span style={{ color: C.green }}>—</span> 150d SMA</span>
+            <span><span style={{ background: C.red, opacity: 0.5, display: "inline-block", width: 10, height: 8 }} /> Sahm ≥ 0.5</span>
+            <span><span style={{ background: C.amber, opacity: 0.4, display: "inline-block", width: 10, height: 8 }} /> Curve inverted</span>
+          </div>
+        </div>
+        {cur.status === "loading" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 30, color: C.mute, fontSize: 13 }}>
+            <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${C.line}`, borderTopColor: C.blue, display: "inline-block", animation: "spin .8s linear infinite" }} />
+            Loading {range.toUpperCase()} price history…
+          </div>
+        )}
+        {cur.status === "error" && (
+          <div style={{ color: C.red, fontSize: 13, padding: 16 }}>
+            Chart data failed: {cur.err}{" "}
+            <button onClick={() => setCache((p) => { const q = { ...p }; delete q[range]; return q; })}
+              style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button>
+          </div>
+        )}
+        {svgBody}
+        {disclosure}
+      </div>
+    </div>
+  );
+}
+
 /* ---------- main ---------- */
 export default function App() {
   const [state, setState] = useState({ status: "loading", data: null, err: null });
@@ -261,6 +409,9 @@ export default function App() {
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.faint, marginBottom: 6 }}>OVERALL READ</div>
           <div style={{ fontSize: 15, color: banner.col, fontWeight: 500 }}>{banner.txt}</div>
         </div>
+
+        {/* signal map — fetches independently so it renders even if the gauges block fails */}
+        <ChartSection frothPct={frothPct} />
 
         {state.status === "loading" && (
           <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 20, color: C.mute, fontSize: 13 }}>
