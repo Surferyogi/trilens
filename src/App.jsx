@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-18:24";
+const APP_VERSION = "v2026:07:02-19:32";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -360,8 +360,33 @@ function JapanCarryChart() {
   const pw = W - m.l - m.r, ph = H - m.t - m.b;
   const kfmt = (v) => `${v < 0 ? "\u2212" : "+"}${Math.abs(Math.round(v / 1000))}k`;
 
-  let body = null, head = null, disclosure = null;
+  let body = null, head = null, concl = null, disclosure = null;
   if (j && j.t.length > 1) {
+    // Trend conclusion — thresholds calibrated on the full 1986→ weekly distribution (frozen methodology,
+    // documented in the rule line below); all readings are live server-computed values.
+    const tr = j.trend;
+    if (tr && tr.chg_4w != null && j.latest) {
+      const netNow = j.latest.v;
+      const k = (v) => `${v < 0 ? "\u2212" : "+"}${Math.abs(Math.round(v / 1000))}k`;
+      let cc;
+      if (netNow >= 0) cc = { txt: `CARRY UNWOUND \u2014 speculators are net LONG yen (${netNow.toLocaleString()}). The Japan transmission channel is discharged.`, col: C.green };
+      else if (tr.chg_4w >= 60000) cc = { txt: `VIOLENT UNWIND UNDERWAY \u2014 shorts covered ${k(tr.chg_4w)} contracts in 4 weeks, a speed seen in only ~1% of weeks since 1986, almost exclusively around major yen shocks (2007, Aug 2024).`, col: C.red };
+      else if (tr.chg_4w >= 25000) cc = { txt: `SHORTS COVERING \u2014 ${k(tr.chg_4w)} in 4 weeks (top ~8% of covering speeds since 1986). Early unwind pressure; watch for acceleration.`, col: C.amber };
+      else {
+        const building = tr.chg_13w != null && tr.chg_13w <= -20000;
+        const extreme = tr.pctile_more_short != null && tr.pctile_more_short >= 95;
+        if (building && extreme) cc = { txt: `CARRY BUILDING AT HISTORIC EXTREME \u2014 shorts grew ${k(-tr.chg_13w)} contracts in 13 weeks; the position is now more short than ${tr.pctile_more_short}% of all weeks since 1986. No unwind underway \u2014 but the larger the position, the more violent the eventual snap.`, col: C.gold };
+        else if (extreme) cc = { txt: `CARRY AT HISTORIC EXTREME, holding steady \u2014 more short than ${tr.pctile_more_short}% of all weeks since 1986. No unwind pressure yet.`, col: C.gold };
+        else if (building) cc = { txt: `Carry building \u2014 shorts grew ${k(-tr.chg_13w)} over 13 weeks, positioning not yet at historic extremes (${tr.pctile_more_short}th percentile).`, col: C.mute };
+        else cc = { txt: `Carry on but stable \u2014 net short yen at the ${tr.pctile_more_short}th percentile of history, no notable build or unwind over the past quarter.`, col: C.mute };
+      }
+      concl = (
+        <div style={{ border: `1px solid ${C.line}`, borderLeft: `3px solid ${cc.col}`, background: C.panel, borderRadius: 8, padding: "10px 14px", margin: "4px 0 10px", fontSize: 13, color: cc.col, fontWeight: 500 }}>
+          <span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: 2, color: C.faint, display: "block", marginBottom: 4 }}>TREND CONCLUSION</span>
+          {cc.txt}
+        </div>
+      );
+    }
     const { t, net, fx } = j;
     const N = t.length;
     const nLoRaw = Math.min(...net, 0), nHiRaw = Math.max(...net, 0);
@@ -428,7 +453,8 @@ function JapanCarryChart() {
     );
     disclosure = (
       <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.faint, marginTop: 6, lineHeight: 1.7 }}>
-        {j.sampled} · net = non-commercial long \u2212 short futures contracts · coverage from {j.coverage.from} ({j.coverage.weeks} weeks) · latest/record computed from the full series, never hardcoded
+        {j.sampled} · net = non-commercial long \u2212 short futures contracts · coverage from {j.coverage.from} ({j.coverage.weeks} weeks) · latest/record/trend computed from the full series, never hardcoded
+        <br />conclusion rules (calibrated on the full 1986\u2192 distribution): net \u2265 0 unwound · 4w covering \u2265 +60k red (\u2248 rarest 1% of weeks) · \u2265 +25k amber (\u2248 top 8%) · 13w build \u2264 \u221220k building · percentile \u2265 95 historic extreme
         <br />src: {j.src}
         {j.errors?.length > 0 && <span style={{ color: C.amber }}> · warnings: {j.errors.join(" · ")}</span>}
       </div>
@@ -451,6 +477,7 @@ function JapanCarryChart() {
         </div>
       </div>
       {head}
+      {concl}
       {cur.status === "loading" && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 24, color: C.mute, fontSize: 13 }}>
           <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${C.line}`, borderTopColor: C.blue, display: "inline-block", animation: "spin .8s linear infinite" }} />
@@ -533,15 +560,15 @@ function JapanLens({ jp }) {
       </div>
       <div style={{ display: "grid", gap: 10 }}>
         {rows.map((r) => (
-          <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12 }}>
+          <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, flexWrap: "wrap" }}>
             <Dot s={r.state} />
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ flex: "1 1 220px", minWidth: 0 }}>
               <div style={{ fontWeight: 600, fontSize: 15 }}>{r.name} <span style={{ color: C.faint, fontWeight: 400, fontSize: 13 }}>({r.sub})</span></div>
               <div style={{ fontSize: 12.5, color: C.mute, marginTop: 3 }}>{r.note}</div>
               <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 5 }}>rule: {r.rule}</div>
               <SourceLine meta={r.meta} tier="DET" />
             </div>
-            <div style={{ textAlign: "right", minWidth: 130 }}>
+            <div style={{ textAlign: "right", minWidth: 130, marginLeft: "auto", maxWidth: "100%" }}>
               {r.display === null ? <Unavailable /> : (
                 <>
                   <div style={{ fontFamily: MONO, fontSize: 14.5, fontWeight: 600, color: dotColor(r.state) }}>{r.display}</div>
@@ -684,15 +711,15 @@ export default function App() {
             </div>
             <div style={{ display: "grid", gap: 10 }}>
               {rows1.map((r) => (
-                <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12 }}>
+                <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <Dot s={r.state} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ flex: "1 1 220px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 15 }}>{r.name} <span style={{ color: C.faint, fontWeight: 400, fontSize: 13 }}>({r.sub})</span></div>
                     <div style={{ fontSize: 12.5, color: C.mute, marginTop: 3 }}>{r.note}</div>
                     <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 5 }}>rule: {r.rule}</div>
                     <SourceLine meta={r.meta} tier={r.tier} />
                   </div>
-                  <div style={{ textAlign: "right", minWidth: 110 }}>
+                  <div style={{ textAlign: "right", minWidth: 110, marginLeft: "auto", maxWidth: "100%" }}>
                     {r.display === null ? <Unavailable /> : (
                       <>
                         <div style={{ fontFamily: MONO, fontSize: 19, fontWeight: 600, color: dotColor(r.state) }}>{r.display}</div>

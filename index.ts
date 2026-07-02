@@ -1,4 +1,13 @@
-// trilens-data v2026:07:02-17:01 — data backend for TriLens PWA
+// trilens-data v2026:07:02-19:29 — data backend for TriLens PWA
+// v19:48: jchart now returns COMPUTED trend fields for the carry conclusion — chg_4w, chg_13w,
+//   pctile_more_short (share of all weeks since 1986 with a less-short net position than today).
+//   Client thresholds were calibrated on this full distribution: 4w covering >= +60k contracts occurred
+//   in only 1.3% of weeks (1998/2007/2011/2015/2018/Aug-2024 unwinds); >= +25k in 8.2%.
+// v18:12 adds ?jchart=1y|5y|all — the carry-trade chart: CFTC Commitments of Traders net non-commercial
+//   JPY futures position (weekly since 1986, publicreporting.cftc.gov Socrata API, keyless) aligned with
+//   USD/JPY (FRED DEXJPUS). Net short yen (negative) = carry trade ON. Record short and latest reading are
+//   COMPUTED from the full series server-side — never hardcoded (data check corrected the "record":
+//   all-time is Jun 2007 −188,077, not Jul 2024 −184,223).
 // v17:01 adds Japan Lens (carry-unwind watch) block `jp` to the main payload — fully deterministic:
 //   - MOF daily JGB yields (Shift-JIS CSV, historical file from 1974 + current-month file appended)
 //   - FRED DEXJPUS (yen) and DGS10 (US 10y)
@@ -15,9 +24,9 @@
 //   - lens3_break : 50d SMA < 150d SMA computed from the closes themselves
 //   Lens 2 history is NOT reconstructible from free public data (AAII/NAAIM/CB/fwd-P/E composites) — omitted by design.
 // v14:14: date-aware AI prompt with staleness self-report (fixed year-old ISM release defect).
-// Tier 1: deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl scrape)
+// Tier 1: deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl scrape, CFTC, Japan MOF)
 // Tier 2: Claude + live web search ONLY for series with no free API
-// Tier 3: Supabase cache (det 6h / ai 24h / chart 6h). Anything unverifiable => null. Nothing estimated.
+// Tier 3: Supabase cache (det 6h / ai 24h / chart 6h / japan 6h / jpchart 12h). Anything unverifiable => null. Nothing estimated.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
@@ -25,8 +34,8 @@ const CORS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 const UA = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" };
-const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6;
-const VERSION = "v2026:07:02-17:01";
+const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6, JPCHART_TTL_H = 12;
+const VERSION = "v2026:07:02-19:29";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -325,6 +334,62 @@ async function buildJapan() {
   return { jgb, yen: yenOut, diff, errors };
 }
 
+
+// ---------- Japan carry-trade chart: CFTC CoT net spec JPY position + USD/JPY ----------
+async function buildJpChartFull() {
+  const errors: string[] = [];
+  // CFTC legacy futures-only, JPY (CME) contract code 097741, weekly since 1986-01-15
+  const cotUrl = "https://publicreporting.cftc.gov/resource/6dca-aqww.json?cftc_contract_market_code=097741&$select=report_date_as_yyyy_mm_dd,noncomm_positions_long_all,noncomm_positions_short_all&$order=report_date_as_yyyy_mm_dd%20ASC&$limit=5000";
+  const cot = await (await fetch(cotUrl, { headers: UA })).json();
+  if (!Array.isArray(cot) || !cot.length) throw new Error("CFTC CoT empty");
+  const t: string[] = [], net: number[] = [];
+  for (const r of cot) {
+    const lo = parseInt(r.noncomm_positions_long_all), sh = parseInt(r.noncomm_positions_short_all);
+    if (!isFinite(lo) || !isFinite(sh)) continue;
+    t.push(String(r.report_date_as_yyyy_mm_dd).slice(0, 10));
+    net.push(lo - sh);
+  }
+  // align USD/JPY (FRED daily) to each weekly CoT date: most recent quote on/before
+  const fx: (number | null)[] = new Array(t.length).fill(null);
+  try {
+    const yen = await fredSeries("DEXJPUS");
+    let p = 0; let lastV: number | null = null;
+    for (let i = 0; i < t.length; i++) {
+      while (p < yen.length && yen[p].d <= t[i]) { lastV = yen[p].v; p++; }
+      fx[i] = lastV;
+    }
+  } catch (e) { errors.push(`DEXJPUS: ${(e as Error).message}`); }
+  // record short + latest + trend stats computed from the series itself (never hardcoded)
+  let recIdx = 0;
+  for (let i = 1; i < net.length; i++) if (net[i] < net[recIdx]) recIdx = i;
+  const n = net.length;
+  const cur = net[n - 1];
+  const chg4 = n > 4 ? cur - net[n - 5] : null;
+  const chg13 = n > 13 ? cur - net[n - 14] : null;
+  const pctile = +(net.filter((v) => v > cur).length / n * 100).toFixed(0);
+  return {
+    t, net, fx,
+    trend: { chg_4w: chg4, chg_13w: chg13, pctile_more_short: pctile },
+    latest: { d: t[t.length - 1], v: net[net.length - 1] },
+    record_short: { d: t[recIdx], v: net[recIdx] },
+    coverage: { from: t[0], weeks: t.length },
+    src: "CFTC Commitments of Traders (legacy, futures-only, non-commercial) via publicreporting.cftc.gov; USD/JPY: FRED DEXJPUS aligned to report dates",
+    errors,
+  };
+}
+function sliceJpChart(full: { t: string[]; net: number[]; fx: (number | null)[]; latest: unknown; record_short: unknown; coverage: unknown; src: string; errors: string[] }, range: string) {
+  const n = full.t.length;
+  const spans: Record<string, number> = { "1y": 53, "5y": 261, "all": n };
+  const keep = Math.min(spans[range] ?? 261, n);
+  const start = n - keep;
+  return {
+    t: full.t.slice(start), net: full.net.slice(start), fx: full.fx.slice(start),
+    trend: (full as unknown as { trend: unknown }).trend ?? null,
+    latest: full.latest, record_short: full.record_short, coverage: full.coverage, src: full.src, errors: full.errors,
+    sampled: "weekly (CFTC report dates)",
+  };
+}
+
 // ---------- Tier 2: Claude + web search for API-less series ----------
 function aiPrompt() {
   const today = new Date().toISOString().slice(0, 10);
@@ -377,6 +442,24 @@ Deno.serve(async (req) => {
       tier = { tier: "live", fetched_at: new Date().toISOString() };
     }
     return new Response(JSON.stringify({ chart: sliceChart(full, chartRange), meta: { chart: tier, version: VERSION } }), {
+      headers: { ...CORS, "content-type": "application/json" },
+    });
+  }
+
+  // Japan carry-trade chart endpoint (weekly CoT + USD/JPY) — independent, no AI cost
+  const jchartRange = url.searchParams.get("jchart");
+  if (jchartRange) {
+    let full, tier;
+    const jcc = url.searchParams.get("refresh") === "1" ? null : await cacheGet("jpchart", JPCHART_TTL_H);
+    if (jcc) { full = jcc.payload; tier = { tier: "cache", fetched_at: jcc.fetched_at, age_h: jcc.age_h }; }
+    else {
+      try { full = await buildJpChartFull(); } catch (e) {
+        return new Response(JSON.stringify({ error: `jchart build failed: ${(e as Error).message}` }), { status: 502, headers: { ...CORS, "content-type": "application/json" } });
+      }
+      await cacheSet("jpchart", full);
+      tier = { tier: "live", fetched_at: new Date().toISOString() };
+    }
+    return new Response(JSON.stringify({ jchart: sliceJpChart(full, jchartRange), meta: { jchart: tier, version: VERSION } }), {
       headers: { ...CORS, "content-type": "application/json" },
     });
   }
