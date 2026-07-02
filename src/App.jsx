@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-15:51";
+const APP_VERSION = "v2026:07:02-17:01";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -319,6 +319,95 @@ function ChartSection({ frothPct }) {
   );
 }
 
+/* ---------- Japan Lens: carry-unwind watch (v2026:07:02-17:01) ----------
+   Deterministic (MOF daily JGB yields + FRED). Measures the Japan transmission channel:
+   fast JGB tightening + yen snap-back = carry-trade unwind (the Aug 5, 2024 mechanism).
+   DELIBERATELY EXCLUDED from the Lens-2 froth % to preserve that composite's
+   "65-70% ≈ prior peaks" band comparability. Thresholds are disclosed methodology. */
+function JapanLens({ jp }) {
+  const jgb = jp?.jgb, yen = jp?.yen, diff = jp?.diff;
+  const jgbV = jgb && jgb.d10_3m_bp != null
+    ? (jgb.d30_3m_bp != null ? Math.max(jgb.d10_3m_bp, jgb.d30_3m_bp) : jgb.d10_3m_bp)
+    : null;
+  const yenApp = yen && typeof yen.chg_1m_pct === "number" ? +(-yen.chg_1m_pct).toFixed(2) : null; // positive = yen strengthening
+  const compV = diff && typeof diff.compress_3m_bp === "number" ? diff.compress_3m_bp : null;
+  const bp = (v) => `${v > 0 ? "+" : ""}${v}bp`;
+
+  const rows = [
+    {
+      name: "JGB Tightening Shock", sub: "10y & 30y JGB yields, 3-month change",
+      note: "Fast JGB yield rises squeeze the yen carry trade and pull global long rates up. Speed matters, not level — 2025's slow rise was orderly; the danger is a spike.",
+      rule: "Green < +40bp · Amber +40–79bp · Red ≥ +80bp (max of 10y/30y over 3m)",
+      v: jgbV,
+      display: jgbV != null && jgb ? `10y ${bp(jgb.d10_3m_bp)}${jgb.d30_3m_bp != null ? ` · 30y ${bp(jgb.d30_3m_bp)}` : ""}` : null,
+      extra: jgb?.y10 ? `10y ${jgb.y10.v}% · 30y ${jgb.y30 ? jgb.y30.v + "%" : "n/a"}` : null,
+      st: (v) => (v >= 80 ? "red" : v >= 40 ? "amber" : "green"),
+      meta: jgb ? { d: `${jgb.from} → ${jgb.y10?.d}`, src: jgb.src } : null,
+    },
+    {
+      name: "Yen Shock", sub: "USD/JPY, 1-month move",
+      note: "Sharp yen strengthening is the unwind actually happening — the Aug 2024 flash crash saw ~8–12% yen appreciation in weeks. Yen weakening = carry being added (tinderbox grows).",
+      rule: "Green < 3% yen appreciation/1m · Amber 3–5.9% · Red ≥ 6%",
+      v: yenApp,
+      display: yenApp != null && yen ? `¥${yen.usdjpy}/USD · yen ${yenApp > 0 ? "+" : ""}${yenApp}% 1m (${yenApp > 0 ? "strengthening" : "weakening"})` : null,
+      st: (v) => (v >= 6 ? "red" : v >= 3 ? "amber" : "green"),
+      meta: yen ? { d: `as of ${yen.d}`, src: yen.src } : null,
+    },
+    {
+      name: "US−JP Yield Gap Compression", sub: "10y differential, 3-month change",
+      note: "The gap is what makes the carry trade pay. Rapid compression (BOJ hiking into a Fed pivot) erodes it and pressures positions to unwind.",
+      rule: "Green < +50bp compression/3m · Amber +50–99bp · Red ≥ +100bp",
+      v: compV,
+      display: compV != null && diff ? `US−JP ${diff.now_pct}% · ${compV >= 0 ? "compressed" : "widened"} ${Math.abs(compV)}bp 3m` : null,
+      st: (v) => (v >= 100 ? "red" : v >= 50 ? "amber" : "green"),
+      meta: diff ? { d: `US10y ${diff.us10}% as of ${diff.d}`, src: diff.src } : null,
+    },
+  ].map((r) => ({ ...r, state: r.v === null ? "na" : r.st(r.v) }));
+
+  const states = rows.map((r) => r.state);
+  const read = states.includes("red")
+    ? { txt: "Carry unwind in progress — historically coincides with sharp global drawdowns (Aug 2024 pattern).", col: C.red }
+    : states.includes("amber")
+    ? { txt: "Watch — tightening / unwind pressure building in the Japan channel.", col: C.amber }
+    : states.includes("na") && !states.includes("green")
+    ? { txt: "No readings available for the Japan channel.", col: C.mute }
+    : { txt: "Tinderbox growing, no spark — carry intact, no unwind underway. Watch the yen for the reversal.", col: C.green };
+
+  return (
+    <div>
+      <SectionHead label="Japan Lens · Carry-Unwind Watch" title="Is the Japan channel about to break?"
+        desc="The global transmission risk from the Japanese bond market. Not counted in the Lens-2 froth % — different signal class (external fragility, not domestic cycle)." />
+      <div style={{ marginBottom: 12, border: `1px solid ${C.line}`, borderLeft: `3px solid ${read.col}`, background: C.panel, borderRadius: 10, padding: "12px 16px", fontSize: 13.5, color: read.col, fontWeight: 500 }}>
+        {read.txt}
+      </div>
+      <div style={{ display: "grid", gap: 10 }}>
+        {rows.map((r) => (
+          <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 16px", display: "flex", gap: 12 }}>
+            <Dot s={r.state} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 600, fontSize: 15 }}>{r.name} <span style={{ color: C.faint, fontWeight: 400, fontSize: 13 }}>({r.sub})</span></div>
+              <div style={{ fontSize: 12.5, color: C.mute, marginTop: 3 }}>{r.note}</div>
+              <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 5 }}>rule: {r.rule}</div>
+              <SourceLine meta={r.meta} tier="DET" />
+            </div>
+            <div style={{ textAlign: "right", minWidth: 130 }}>
+              {r.display === null ? <Unavailable /> : (
+                <>
+                  <div style={{ fontFamily: MONO, fontSize: 14.5, fontWeight: 600, color: dotColor(r.state) }}>{r.display}</div>
+                  {r.extra && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mute, marginTop: 2 }}>{r.extra}</div>}
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {jp?.errors?.length > 0 && (
+        <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 10.5, color: C.amber }}>fetcher warnings: {jp.errors.join(" · ")}</div>
+      )}
+    </div>
+  );
+}
+
 /* ---------- main ---------- */
 export default function App() {
   const [state, setState] = useState({ status: "loading", data: null, err: null });
@@ -504,6 +593,9 @@ export default function App() {
               ))}
             </div>
 
+            {/* JAPAN LENS — carry-unwind watch (excluded from Lens-2 froth % by design) */}
+            <JapanLens jp={state.data?.jp} />
+
             {/* LENS 3 */}
             <SectionHead label="Lens 3 · Price Trend" title="Has the trend actually broken?" desc="50-day vs 150-day SMA on daily candles, computed server-side from Yahoo Finance closes. This is the act trigger." />
             <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "16px 18px", display: "flex", gap: 14, flexWrap: "wrap" }}>
@@ -540,7 +632,7 @@ export default function App() {
 
         {/* footer */}
         <div style={{ marginTop: 40, borderTop: `1px solid ${C.line}`, paddingTop: 16, fontSize: 11.5, color: C.faint, lineHeight: 1.6 }}>
-          <strong style={{ color: C.mute }}>Data honesty</strong> — every reading is fetched from its named source with the as-of period shown. LIVE API = deterministic public data (FRED, Yahoo Finance, multpl). AI SEARCH = Claude with live web search, used only for series that publish no free API (ISM, LEI, Consumer Confidence, AAII, NAAIM, forward P/E, deal volume); those cards carry a STALE? flag if the release looks old. Unverifiable values display "Data unavailable" and are excluded from all percentages. Nothing is hardcoded or estimated. Thresholds are disclosed methodology printed on every card.
+          <strong style={{ color: C.mute }}>Data honesty</strong> — every reading is fetched from its named source with the as-of period shown. LIVE API = deterministic public data (FRED, Yahoo Finance, multpl). AI SEARCH = Claude with live web search, used only for series that publish no free API (ISM, LEI, Consumer Confidence, AAII, NAAIM, forward P/E, deal volume); those cards carry a STALE? flag if the release looks old. Unverifiable values display "Data unavailable" and are excluded from all percentages. Nothing is hardcoded or estimated. Thresholds are disclosed methodology printed on every card. The Japan Lens uses Japan MOF daily JGB yields and FRED (yen, US 10y) and is deliberately excluded from the Lens-2 froth % so that composite stays comparable to its historical peak bands.
           <br />
           <strong style={{ color: C.mute }}>Educational use only — not financial advice.</strong> Lens-2 signals are indicative gauges of market-peak conditions, not precise timing tools. Indicators describe probabilities, not certainties; no single gauge times the market. Trading and investing carry a high level of risk; past performance is not indicative of future results.
         </div>

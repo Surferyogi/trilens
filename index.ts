@@ -1,4 +1,9 @@
-// trilens-data v2026:07:02-15:51 — data backend for TriLens PWA
+// trilens-data v2026:07:02-17:01 — data backend for TriLens PWA
+// v17:01 adds Japan Lens (carry-unwind watch) block `jp` to the main payload — fully deterministic:
+//   - MOF daily JGB yields (Shift-JIS CSV, historical file from 1974 + current-month file appended)
+//   - FRED DEXJPUS (yen) and DGS10 (US 10y)
+//   Gauges: JGB 10y/30y 3-month momentum (bp), yen 1-month move, US−JP 10y differential 3-month compression.
+//   Deliberately EXCLUDED from the Lens-2 froth % to preserve that composite's peak-band comparability.
 // DEPLOYED to Supabase project pvqwpzbjremcyobnsldd (connex), verify_jwt=false. Canonical repo copy.
 // Redeploy after edits: supabase functions deploy trilens-data --no-verify-jwt --project-ref pvqwpzbjremcyobnsldd
 //
@@ -20,8 +25,8 @@ const CORS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 const UA = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" };
-const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6;
-const VERSION = "v2026:07:02-15:51";
+const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6;
+const VERSION = "v2026:07:02-17:01";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -238,6 +243,88 @@ function sliceChart(full: { t: string[]; c: number[]; s50: (number | null)[]; s1
   };
 }
 
+
+// ---------- Japan Lens: carry-unwind watch (deterministic; MOF + FRED) ----------
+async function fetchMofCsv(url: string): Promise<string> {
+  const buf = await (await fetch(url, { headers: UA })).arrayBuffer();
+  try { return new TextDecoder("shift_jis").decode(buf); }
+  catch { return new TextDecoder("utf-8", { fatal: false }).decode(buf); }
+}
+// Parse MOF JGB CSV rows (Date,1Y..40Y); "-" = no data. Returns per-tenor {d,v} arrays for 10Y (idx 10) and 30Y (idx 14).
+function parseMof(text: string) {
+  const out10: { d: string; v: number }[] = [], out30: { d: string; v: number }[] = [];
+  for (const line of text.split("\n")) {
+    if (!/^\d{4}\//.test(line)) continue;
+    const c = line.trim().split(",");
+    const [y, mo, da] = c[0].split("/");
+    const d = `${y}-${mo.padStart(2, "0")}-${da.padStart(2, "0")}`;
+    const v10 = parseFloat(c[10]), v30 = parseFloat(c[14]);
+    if (isFinite(v10)) out10.push({ d, v: v10 });
+    if (isFinite(v30)) out30.push({ d, v: v30 });
+  }
+  return { out10, out30 };
+}
+function chgOver(s: { d: string; v: number }[], obs: number) {
+  if (s.length < obs + 1) return null;
+  return { now: last(s).v, prev: s[s.length - 1 - obs].v, prevDate: s[s.length - 1 - obs].d };
+}
+async function buildJapan() {
+  const errors: string[] = [];
+  const safe = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
+    try { return await fn(); } catch (e) { errors.push(`${name}: ${(e as Error).message}`); return null; }
+  };
+  const [mofAll, mofCur, yen, us10] = await Promise.all([
+    safe("MOF-hist", () => fetchMofCsv("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv")),
+    safe("MOF-cur", () => fetchMofCsv("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv")),
+    safe("DEXJPUS", () => fredSeries("DEXJPUS")),
+    safe("DGS10", () => fredSeries("DGS10")),
+  ]);
+  let jgb = null;
+  if (mofAll) {
+    const a = parseMof(mofAll);
+    if (mofCur) {
+      const c = parseMof(mofCur);
+      const cut10 = a.out10.length ? last(a.out10).d : "";
+      const cut30 = a.out30.length ? last(a.out30).d : "";
+      a.out10.push(...c.out10.filter((x) => x.d > cut10));
+      a.out30.push(...c.out30.filter((x) => x.d > cut30));
+    }
+    const m10 = chgOver(a.out10, 63), m30 = chgOver(a.out30, 63); // ~3 months of trading days
+    jgb = {
+      y10: a.out10.length ? { v: last(a.out10).v, d: last(a.out10).d } : null,
+      y30: a.out30.length ? { v: last(a.out30).v, d: last(a.out30).d } : null,
+      d10_3m_bp: m10 ? +((m10.now - m10.prev) * 100).toFixed(0) : null,
+      d30_3m_bp: m30 ? +((m30.now - m30.prev) * 100).toFixed(0) : null,
+      from: m10 ? m10.prevDate : null,
+      src: "Japan MOF daily JGB yields (historical + current-month CSV)",
+    };
+  }
+  let yenOut = null;
+  if (yen && yen.length > 22) {
+    const m = chgOver(yen, 21); // ~1 month of trading days
+    yenOut = m ? {
+      usdjpy: m.now, d: last(yen).d,
+      chg_1m_pct: +((m.now / m.prev - 1) * 100).toFixed(2), // negative = yen strengthening
+      src: "FRED (DEXJPUS)",
+    } : null;
+  }
+  let diff = null;
+  if (us10 && us10.length > 64 && jgb && jgb.y10 && jgb.d10_3m_bp != null) {
+    const mu = chgOver(us10, 63);
+    if (mu) {
+      const dUs_bp = (mu.now - mu.prev) * 100;
+      diff = {
+        now_pct: +(mu.now - jgb.y10.v).toFixed(2),
+        us10: mu.now, d: last(us10).d,
+        compress_3m_bp: +(jgb.d10_3m_bp - dUs_bp).toFixed(0), // positive = US-JP gap narrowing
+        note: "3m changes computed per series by trading-day count (US and JP calendars differ)",
+        src: "FRED (DGS10) − MOF JGB 10y",
+      };
+    }
+  }
+  return { jgb, yen: yenOut, diff, errors };
+}
+
 // ---------- Tier 2: Claude + web search for API-less series ----------
 function aiPrompt() {
   const today = new Date().toISOString().slice(0, 10);
@@ -307,7 +394,12 @@ Deno.serve(async (req) => {
   if (ac) { ai = ac.payload; aiMeta = { tier: "cache", fetched_at: ac.fetched_at, age_h: ac.age_h }; }
   else { ai = await buildAI(); await cacheSet("ai", ai); aiMeta = { tier: "live", fetched_at: new Date().toISOString() }; }
 
-  return new Response(JSON.stringify({ det, ai, meta: { det: detMeta, ai: aiMeta, version: VERSION } }), {
+  let jp, jpMeta;
+  const jc = forceDet ? null : await cacheGet("japan", JP_TTL_H);
+  if (jc) { jp = jc.payload; jpMeta = { tier: "cache", fetched_at: jc.fetched_at, age_h: jc.age_h }; }
+  else { jp = await buildJapan(); await cacheSet("japan", jp); jpMeta = { tier: "live", fetched_at: new Date().toISOString() }; }
+
+  return new Response(JSON.stringify({ det, ai, jp, meta: { det: detMeta, ai: aiMeta, jp: jpMeta, version: VERSION } }), {
     headers: { ...CORS, "content-type": "application/json" },
   });
 });

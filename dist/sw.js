@@ -1,8 +1,8 @@
-// TriLens service worker — v2026:07:02-14:14
+// TriLens service worker — v2026:07:02-15:51
 // POLICY: app shell is cached for offline launch; the trilens-data API is NEVER
 // cached here. Freshness/caching of readings is handled server-side with
 // labelled tiers so the UI can always tell the truth about data age.
-const CACHE = "trilens-shell-v2026-07-02-1414";
+const CACHE = "trilens-shell-v2026-07-02-1551";
 
 self.addEventListener("install", (e) => {
   self.skipWaiting();
