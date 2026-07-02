@@ -10,7 +10,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-17:01";
+const APP_VERSION = "v2026:07:02-18:24";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -319,6 +319,157 @@ function ChartSection({ frothPct }) {
   );
 }
 
+/* ---------- Japan Lens helpers (v2026:07:02-18:24) ----------
+   japanWorst(): worst gauge state for the OVERALL banner override.
+   KEEP THRESHOLDS IN SYNC with the JapanLens rows below (same three rules). */
+function japanWorst(jp) {
+  const jgb = jp?.jgb, yen = jp?.yen, diff = jp?.diff;
+  const jgbV = jgb && jgb.d10_3m_bp != null
+    ? (jgb.d30_3m_bp != null ? Math.max(jgb.d10_3m_bp, jgb.d30_3m_bp) : jgb.d10_3m_bp) : null;
+  const yenApp = yen && typeof yen.chg_1m_pct === "number" ? -yen.chg_1m_pct : null;
+  const compV = diff && typeof diff.compress_3m_bp === "number" ? diff.compress_3m_bp : null;
+  const st = [
+    jgbV == null ? null : jgbV >= 80 ? "red" : jgbV >= 40 ? "amber" : "green",
+    yenApp == null ? null : yenApp >= 6 ? "red" : yenApp >= 3 ? "amber" : "green",
+    compV == null ? null : compV >= 100 ? "red" : compV >= 50 ? "amber" : "green",
+  ].filter(Boolean);
+  if (!st.length) return "na";
+  return st.includes("red") ? "red" : st.includes("amber") ? "amber" : "green";
+}
+
+/* Carry-trade chart: CFTC CoT net non-commercial JPY futures position (weekly, 1986→) + USD/JPY.
+   Net SHORT yen (below zero) = carry trade ON. Record short and latest are COMPUTED server-side
+   from the full series — never hardcoded. Hand-rolled SVG, no new dependencies. */
+function JapanCarryChart() {
+  const [range, setRange] = useState("5y");
+  const [cache, setCache] = useState({});
+  const cur = cache[range] || { status: "idle" };
+
+  useEffect(() => {
+    if (cache[range]) return;
+    setCache((p) => ({ ...p, [range]: { status: "loading" } }));
+    fetch(`${API}?jchart=${range}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j) => setCache((p) => ({ ...p, [range]: j.error ? { status: "error", err: j.error } : { status: "done", data: j } })))
+      .catch((e) => setCache((p) => ({ ...p, [range]: { status: "error", err: e.message } })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range]);
+
+  const j = cur.data?.jchart;
+  const W = 820, H = 300, m = { l: 66, r: 60, t: 16, b: 34 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const kfmt = (v) => `${v < 0 ? "\u2212" : "+"}${Math.abs(Math.round(v / 1000))}k`;
+
+  let body = null, head = null, disclosure = null;
+  if (j && j.t.length > 1) {
+    const { t, net, fx } = j;
+    const N = t.length;
+    const nLoRaw = Math.min(...net, 0), nHiRaw = Math.max(...net, 0);
+    const pad = (nHiRaw - nLoRaw) * 0.08 || 1;
+    const nLo = nLoRaw - pad, nHi = nHiRaw + pad;
+    const yN = (v) => m.t + (1 - (v - nLo) / (nHi - nLo)) * ph;
+    const fxVals = fx.filter((x) => x != null);
+    const fLo = fxVals.length ? Math.min(...fxVals) * 0.99 : 0, fHi = fxVals.length ? Math.max(...fxVals) * 1.01 : 1;
+    const yF = (v) => m.t + (1 - (v - fLo) / (fHi - fLo)) * ph;
+    const x = (i) => m.l + (i / (N - 1)) * pw;
+
+    let area = `M${x(0).toFixed(1)},${yN(0).toFixed(1)}`;
+    let line = "";
+    for (let i = 0; i < N; i++) {
+      area += `L${x(i).toFixed(1)},${yN(net[i]).toFixed(1)}`;
+      line += `${i ? "L" : "M"}${x(i).toFixed(1)},${yN(net[i]).toFixed(1)}`;
+    }
+    area += `L${x(N - 1).toFixed(1)},${yN(0).toFixed(1)}Z`;
+    let fxPath = "", pen = false;
+    for (let i = 0; i < N; i++) {
+      if (fx[i] == null) { pen = false; continue; }
+      fxPath += `${pen ? "L" : "M"}${x(i).toFixed(1)},${yF(fx[i]).toFixed(1)}`;
+      pen = true;
+    }
+    const nTicks = Array.from({ length: 5 }, (_, k) => nLo + (k * (nHi - nLo)) / 4);
+    const fTicks = fxVals.length ? Array.from({ length: 4 }, (_, k) => fLo + (k * (fHi - fLo)) / 3) : [];
+    const xTickIdx = Array.from({ length: 6 }, (_, k) => Math.round((k * (N - 1)) / 5));
+    const xLabel = (d) => (range === "1y" ? `${MO[+d.slice(5, 7) - 1]} '${d.slice(2, 4)}` : d.slice(0, 4));
+    const recIdx = j.record_short && j.record_short.d >= t[0] ? t.indexOf(j.record_short.d) : -1;
+
+    body = (
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Yen carry trade positioning">
+        {nTicks.map((v, k) => (
+          <g key={k}>
+            <line x1={m.l} x2={W - m.r} y1={yN(v)} y2={yN(v)} stroke={C.line} strokeWidth="0.6" />
+            <text x={m.l - 8} y={yN(v) + 3.5} textAnchor="end" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{kfmt(v)}</text>
+          </g>
+        ))}
+        {fTicks.map((v, k) => (
+          <text key={k} x={W - m.r + 8} y={yF(v) + 3.5} textAnchor="start" fontSize="10.5" fill={C.blue} fontFamily={MONO} opacity="0.8">{v.toFixed(0)}</text>
+        ))}
+        {xTickIdx.map((i, k) => (
+          <text key={k} x={x(i)} y={H - m.b + 26} textAnchor="middle" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{xLabel(t[i])}</text>
+        ))}
+        <path d={area} fill={C.gold} opacity="0.22" />
+        <path d={line} fill="none" stroke={C.gold} strokeWidth="1.6" />
+        <line x1={m.l} x2={W - m.r} y1={yN(0)} y2={yN(0)} stroke={C.mute} strokeWidth="1" strokeDasharray="4 4" />
+        <text x={m.l + 4} y={yN(0) - 5} fontSize="9.5" fill={C.mute} fontFamily={MONO}>0 \u2014 below = net SHORT yen = carry ON</text>
+        {fxPath && <path d={fxPath} fill="none" stroke={C.blue} strokeWidth="1.4" opacity="0.9" />}
+        {recIdx >= 0 && (
+          <g>
+            <circle cx={x(recIdx)} cy={yN(net[recIdx])} r="4" fill={C.red} stroke={C.bg} strokeWidth="1.5" />
+            <text x={x(recIdx)} y={yN(net[recIdx]) + 16} textAnchor="middle" fontSize="9.5" fill={C.red} fontFamily={MONO}>record {kfmt(j.record_short.v)}</text>
+          </g>
+        )}
+        <circle cx={x(N - 1)} cy={yN(net[N - 1])} r="4" fill={C.gold} stroke={C.bg} strokeWidth="1.5" />
+      </svg>
+    );
+    head = (
+      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, marginBottom: 6 }}>
+        Net spec JPY position: <span style={{ color: C.gold, fontWeight: 600 }}>{j.latest.v.toLocaleString()}</span> contracts ({j.latest.d})
+        <span style={{ color: C.faint }}> · all-time record short {j.record_short.v.toLocaleString()} ({j.record_short.d})</span>
+      </div>
+    );
+    disclosure = (
+      <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.faint, marginTop: 6, lineHeight: 1.7 }}>
+        {j.sampled} · net = non-commercial long \u2212 short futures contracts · coverage from {j.coverage.from} ({j.coverage.weeks} weeks) · latest/record computed from the full series, never hardcoded
+        <br />src: {j.src}
+        {j.errors?.length > 0 && <span style={{ color: C.amber }}> · warnings: {j.errors.join(" · ")}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: C.panelSoft, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 14px 10px", marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ fontWeight: 600, fontSize: 14.5, marginRight: 6 }}>The Carry Trade, Measured <span style={{ color: C.faint, fontWeight: 400, fontSize: 12.5 }}>(speculative yen positioning)</span></div>
+        {["1y", "5y", "all"].map((r) => (
+          <button key={r} onClick={() => setRange(r)}
+            style={{ background: range === r ? C.gold : "transparent", color: range === r ? "#141005" : C.mute, border: `1px solid ${range === r ? C.gold : C.line}`, borderRadius: 6, padding: "4px 12px", fontFamily: MONO, fontSize: 11, fontWeight: 600, cursor: "pointer", letterSpacing: 1 }}>
+            {r.toUpperCase()}
+          </button>
+        ))}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12, fontFamily: MONO, fontSize: 9.5, color: C.mute }}>
+          <span><span style={{ color: C.gold }}>\u25a0</span> net JPY position (left)</span>
+          <span><span style={{ color: C.blue }}>\u2014</span> USD/JPY (right)</span>
+        </div>
+      </div>
+      {head}
+      {cur.status === "loading" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 24, color: C.mute, fontSize: 13 }}>
+          <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${C.line}`, borderTopColor: C.blue, display: "inline-block", animation: "spin .8s linear infinite" }} />
+          Loading CFTC positioning history\u2026
+        </div>
+      )}
+      {cur.status === "error" && (
+        <div style={{ color: C.red, fontSize: 13, padding: 12 }}>
+          Carry chart failed: {cur.err}{" "}
+          <button onClick={() => setCache((p) => { const q = { ...p }; delete q[range]; return q; })}
+            style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button>
+        </div>
+      )}
+      {body}
+      {disclosure}
+    </div>
+  );
+}
+
 /* ---------- Japan Lens: carry-unwind watch (v2026:07:02-17:01) ----------
    Deterministic (MOF daily JGB yields + FRED). Measures the Japan transmission channel:
    fast JGB tightening + yen snap-back = carry-trade unwind (the Aug 5, 2024 mechanism).
@@ -404,6 +555,7 @@ function JapanLens({ jp }) {
       {jp?.errors?.length > 0 && (
         <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 10.5, color: C.amber }}>fetcher warnings: {jp.errors.join(" · ")}</div>
       )}
+      <JapanCarryChart />
     </div>
   );
 }
@@ -452,8 +604,14 @@ export default function App() {
     if (l1Band === "red" && t3.state === "red") verdict = " — the historic sell signal: elevated recession risk plus a trend break.";
     else if (t3.state === "red" && frothBand === "peak") verdict = " — trend break alongside high froth: defensive posture warranted.";
     else if (l1Band !== "red" && t3.state === "green") verdict = " — stay invested, stay disciplined.";
-    const col = l1Band === "red" || t3.state === "red" ? C.red : frothBand === "peak" || l1Band === "amber" || t3.state === "amber" ? C.amber : C.green;
-    return { txt: `${econ} · ${froth} · ${trend}${verdict}`, col };
+    let col = l1Band === "red" || t3.state === "red" ? C.red : frothBand === "peak" || l1Band === "amber" || t3.state === "amber" ? C.amber : C.green;
+    let txt = `${econ} · ${froth} · ${trend}${verdict}`;
+    // Japan Lens = OVERRIDE/AMPLIFIER, not a fourth averaged input: an unwind is a fast coincident
+    // shock (Aug 2024: Lens 1 green, trend intact until the same week) and must never be diluted.
+    const jpW = japanWorst(state.data?.jp);
+    if (jpW === "red") { col = C.red; txt += " ⚠ Japan carry unwind in progress — Aug-2024-type shock risk."; }
+    else if (jpW === "amber") { if (col === C.green) col = C.amber; txt += " · Japan channel pressure building."; }
+    return { txt, col };
   })();
 
   const tierNote = (m) => (m ? `${m.tier === "cache" ? `cached ${m.age_h}h ago` : "fetched live"}` : "—");
@@ -632,7 +790,7 @@ export default function App() {
 
         {/* footer */}
         <div style={{ marginTop: 40, borderTop: `1px solid ${C.line}`, paddingTop: 16, fontSize: 11.5, color: C.faint, lineHeight: 1.6 }}>
-          <strong style={{ color: C.mute }}>Data honesty</strong> — every reading is fetched from its named source with the as-of period shown. LIVE API = deterministic public data (FRED, Yahoo Finance, multpl). AI SEARCH = Claude with live web search, used only for series that publish no free API (ISM, LEI, Consumer Confidence, AAII, NAAIM, forward P/E, deal volume); those cards carry a STALE? flag if the release looks old. Unverifiable values display "Data unavailable" and are excluded from all percentages. Nothing is hardcoded or estimated. Thresholds are disclosed methodology printed on every card. The Japan Lens uses Japan MOF daily JGB yields and FRED (yen, US 10y) and is deliberately excluded from the Lens-2 froth % so that composite stays comparable to its historical peak bands.
+          <strong style={{ color: C.mute }}>Data honesty</strong> — every reading is fetched from its named source with the as-of period shown. LIVE API = deterministic public data (FRED, Yahoo Finance, multpl). AI SEARCH = Claude with live web search, used only for series that publish no free API (ISM, LEI, Consumer Confidence, AAII, NAAIM, forward P/E, deal volume); those cards carry a STALE? flag if the release looks old. Unverifiable values display "Data unavailable" and are excluded from all percentages. Nothing is hardcoded or estimated. Thresholds are disclosed methodology printed on every card. The Japan Lens uses Japan MOF daily JGB yields, FRED (yen, US 10y) and CFTC Commitments of Traders (carry positioning); it is deliberately excluded from the Lens-2 froth % so that composite stays comparable to its historical peak bands — instead it acts as an override on the overall read: a red Japan reading forces a red banner, an amber one lifts a green banner to amber.
           <br />
           <strong style={{ color: C.mute }}>Educational use only — not financial advice.</strong> Lens-2 signals are indicative gauges of market-peak conditions, not precise timing tools. Indicators describe probabilities, not certainties; no single gauge times the market. Trading and investing carry a high level of risk; past performance is not indicative of future results.
         </div>

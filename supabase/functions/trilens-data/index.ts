@@ -1,12 +1,28 @@
-// trilens-data v2026:07:02-14:14 — data backend for TriLens PWA
-// ALREADY DEPLOYED (version 2) to Supabase project pvqwpzbjremcyobnsldd (connex) with --no-verify-jwt.
-// This file is the canonical repo copy. Redeploy after edits with:
-//   supabase functions deploy trilens-data --no-verify-jwt --project-ref pvqwpzbjremcyobnsldd
-// v14:14 fix: date-aware AI prompt — first run returned a year-old ISM release; prompt now anchors to today's date,
-// demands the most recent release, and self-reports staleness so nothing old masquerades as current.
-// Tier 1: deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl scrape)
-// Tier 2: Claude + live web search ONLY for series with no free API (ISM, LEI, CB Confidence, AAII, NAAIM, fwd P/E, deal froth)
-// Tier 3: Supabase cache (det 6h / ai 24h). Anything unverifiable => null. Nothing estimated.
+// trilens-data v2026:07:02-18:24 — data backend for TriLens PWA
+// v18:12 adds ?jchart=1y|5y|all — the carry-trade chart: CFTC Commitments of Traders net non-commercial
+//   JPY futures position (weekly since 1986, publicreporting.cftc.gov Socrata API, keyless) aligned with
+//   USD/JPY (FRED DEXJPUS). Net short yen (negative) = carry trade ON. Record short and latest reading are
+//   COMPUTED from the full series server-side — never hardcoded (data check corrected the "record":
+//   all-time is Jun 2007 −188,077, not Jul 2024 −184,223).
+// v17:01 adds Japan Lens (carry-unwind watch) block `jp` to the main payload — fully deterministic:
+//   - MOF daily JGB yields (Shift-JIS CSV, historical file from 1974 + current-month file appended)
+//   - FRED DEXJPUS (yen) and DGS10 (US 10y)
+//   Gauges: JGB 10y/30y 3-month momentum (bp), yen 1-month move, US−JP 10y differential 3-month compression.
+//   Deliberately EXCLUDED from the Lens-2 froth % to preserve that composite's peak-band comparability.
+// DEPLOYED to Supabase project pvqwpzbjremcyobnsldd (connex), verify_jwt=false. Canonical repo copy.
+// Redeploy after edits: supabase functions deploy trilens-data --no-verify-jwt --project-ref pvqwpzbjremcyobnsldd
+//
+// v15:51 adds ?chart=6m|1y|5y|all — S&P 500 daily history (Yahoo, from 1927 via epoch params;
+//   range=max&interval=1d silently coerces to quarterly, so we use period1/period2) with server-computed
+//   50d/150d SMAs and HONESTLY-SCOPED historical signal bands:
+//   - lens1_sahm  : Sahm Rule >= 0.50 (FRED SAHMREALTIME, monthly, from 1959)   [Lens-1 PROXY, 1 of 7]
+//   - lens1_curve : 10y-3m spread < 0 (FRED T10Y3M, daily, from 1982)           [Lens-1 PROXY, 1 of 7]
+//   - lens3_break : 50d SMA < 150d SMA computed from the closes themselves
+//   Lens 2 history is NOT reconstructible from free public data (AAII/NAAIM/CB/fwd-P/E composites) — omitted by design.
+// v14:14: date-aware AI prompt with staleness self-report (fixed year-old ISM release defect).
+// Tier 1: deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl scrape, CFTC, Japan MOF)
+// Tier 2: Claude + live web search ONLY for series with no free API
+// Tier 3: Supabase cache (det 6h / ai 24h / chart 6h / japan 6h / jpchart 12h). Anything unverifiable => null. Nothing estimated.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
@@ -14,7 +30,8 @@ const CORS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 const UA = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" };
-const DET_TTL_H = 6, AI_TTL_H = 24;
+const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6, JPCHART_TTL_H = 12;
+const VERSION = "v2026:07:02-18:24";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -46,6 +63,22 @@ async function yahooCloses(sym: string, range: string) {
   if (!closes.length) throw new Error(`yahoo empty ${sym}`);
   return { closes, asOf: new Date((res.meta.regularMarketTime || 0) * 1000).toISOString().slice(0, 10) };
 }
+// Full daily history with dates. range=max&interval=1d silently downgrades to quarterly bars,
+// so we request explicit epoch bounds (verified: returns daily from 1927-12-30).
+async function yahooDailyFull(sym: string) {
+  const u = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?period1=-1400000000&period2=9999999999&interval=1d`;
+  const j = await (await fetch(u, { headers: UA })).json();
+  const res = j?.chart?.result?.[0];
+  const ts: number[] = res?.timestamp || [];
+  const cl: (number | null)[] = res?.indicators?.quote?.[0]?.close || [];
+  const t: string[] = [], c: number[] = [];
+  for (let i = 0; i < ts.length; i++) {
+    const v = cl[i];
+    if (v != null && isFinite(v)) { t.push(new Date(ts[i] * 1000).toISOString().slice(0, 10)); c.push(+v.toFixed(2)); }
+  }
+  if (!c.length) throw new Error(`yahoo empty ${sym}`);
+  return { t, c };
+}
 const sma = (c: number[], n: number, endOffset = 0) => {
   const end = c.length - endOffset;
   if (end < n) return null;
@@ -56,12 +89,30 @@ const slopeOf = (nowV: number | null, prevV: number | null) => {
   const pct = (nowV / prevV - 1) * 100;
   return pct > 0.15 ? "rising" : pct < -0.15 ? "falling" : "flat";
 };
-
-async function multpl(path: string, label: string) {
-  const html = await (await fetch(`https://www.multpl.com/${path}`, { headers: UA })).text();
-  const m = html.match(new RegExp(`${label}[^0-9]*([0-9.]+)`));
-  if (!m) throw new Error(`multpl parse fail ${path}`);
-  return parseFloat(m[1]);
+function smaArray(c: number[], n: number): (number | null)[] {
+  const out: (number | null)[] = new Array(c.length).fill(null);
+  let s = 0;
+  for (let i = 0; i < c.length; i++) {
+    s += c[i];
+    if (i >= n) s -= c[i - n];
+    if (i >= n - 1) out[i] = +(s / n).toFixed(1);
+  }
+  return out;
+}
+// contiguous true-runs -> intervals; merge small gaps, drop tiny runs (disclosed methodology, for legibility)
+function intervals(dates: string[], flags: boolean[], mergeGap: number, minLen: number) {
+  const raw: [number, number][] = [];
+  let s = -1;
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i] && s < 0) s = i;
+    if ((!flags[i] || i === flags.length - 1) && s >= 0) { raw.push([s, flags[i] ? i : i - 1]); s = -1; }
+  }
+  const merged: [number, number][] = [];
+  for (const r of raw) {
+    if (merged.length && r[0] - merged[merged.length - 1][1] <= mergeGap) merged[merged.length - 1][1] = r[1];
+    else merged.push([r[0], r[1]]);
+  }
+  return merged.filter(([a, b]) => b - a + 1 >= minLen).map(([a, b]) => ({ a: dates[a], b: dates[b] }));
 }
 
 async function buildDet() {
@@ -135,6 +186,199 @@ async function buildDet() {
   };
 }
 
+async function multpl(path: string, label: string) {
+  const html = await (await fetch(`https://www.multpl.com/${path}`, { headers: UA })).text();
+  const m = html.match(new RegExp(`${label}[^0-9]*([0-9.]+)`));
+  if (!m) throw new Error(`multpl parse fail ${path}`);
+  return parseFloat(m[1]);
+}
+
+// ---------- chart: full daily history + honestly-scoped signal bands ----------
+async function buildChartFull() {
+  const errors: string[] = [];
+  const { t, c } = await yahooDailyFull("^GSPC");
+  const s50 = smaArray(c, 50);
+  const s150 = smaArray(c, 150);
+  // Lens 3: 50d below 150d (merge gaps <=10 trading days; drop runs <5 days — disclosed legibility smoothing)
+  const death = intervals(t, c.map((_, i) => s50[i] != null && s150[i] != null && (s50[i] as number) < (s150[i] as number)), 10, 5);
+  // Lens 1 proxies from FRED history
+  let sahmBands: { a: string; b: string }[] = [], invBands: { a: string; b: string }[] = [];
+  let sahmFrom: string | null = null, curveFrom: string | null = null;
+  try {
+    const sahm = await fredSeries("SAHMREALTIME");
+    sahmFrom = sahm[0]?.d ?? null;
+    sahmBands = intervals(sahm.map((x) => x.d), sahm.map((x) => x.v >= 0.5), 1, 1); // monthly series
+  } catch (e) { errors.push(`SAHM hist: ${(e as Error).message}`); }
+  try {
+    const yc = await fredSeries("T10Y3M");
+    curveFrom = yc[0]?.d ?? null;
+    invBands = intervals(yc.map((x) => x.d), yc.map((x) => x.v < 0), 10, 5);
+  } catch (e) { errors.push(`T10Y3M hist: ${(e as Error).message}`); }
+  return {
+    t, c, s50, s150,
+    bands: { lens1_sahm: sahmBands, lens1_curve: invBands, lens3_break: death },
+    coverage: { px_from: t[0], sahm_from: sahmFrom, curve_from: curveFrom },
+    errors,
+  };
+}
+
+function sliceChart(full: { t: string[]; c: number[]; s50: (number | null)[]; s150: (number | null)[]; bands: unknown; coverage: unknown; errors: string[] }, range: string) {
+  const n = full.t.length;
+  const spans: Record<string, { obs: number; step: number; sampled: string }> = {
+    "6m": { obs: 128, step: 1, sampled: "daily" },
+    "1y": { obs: 253, step: 1, sampled: "daily" },
+    "5y": { obs: 1265, step: 5, sampled: "every 5th trading day" },
+    "all": { obs: n, step: 21, sampled: "every 21st trading day (~monthly)" },
+  };
+  const sp = spans[range] || spans["1y"];
+  const start = Math.max(0, n - sp.obs);
+  const idx: number[] = [];
+  for (let i = start; i < n; i += sp.step) idx.push(i);
+  if (idx[idx.length - 1] !== n - 1) idx.push(n - 1); // always include latest close
+  return {
+    t: idx.map((i) => full.t[i]),
+    c: idx.map((i) => full.c[i]),
+    s50: idx.map((i) => full.s50[i]),
+    s150: idx.map((i) => full.s150[i]),
+    bands: full.bands,
+    coverage: full.coverage,
+    sampled: sp.sampled,
+    window_from: full.t[start],
+    errors: full.errors,
+  };
+}
+
+
+// ---------- Japan Lens: carry-unwind watch (deterministic; MOF + FRED) ----------
+async function fetchMofCsv(url: string): Promise<string> {
+  const buf = await (await fetch(url, { headers: UA })).arrayBuffer();
+  try { return new TextDecoder("shift_jis").decode(buf); }
+  catch { return new TextDecoder("utf-8", { fatal: false }).decode(buf); }
+}
+// Parse MOF JGB CSV rows (Date,1Y..40Y); "-" = no data. Returns per-tenor {d,v} arrays for 10Y (idx 10) and 30Y (idx 14).
+function parseMof(text: string) {
+  const out10: { d: string; v: number }[] = [], out30: { d: string; v: number }[] = [];
+  for (const line of text.split("\n")) {
+    if (!/^\d{4}\//.test(line)) continue;
+    const c = line.trim().split(",");
+    const [y, mo, da] = c[0].split("/");
+    const d = `${y}-${mo.padStart(2, "0")}-${da.padStart(2, "0")}`;
+    const v10 = parseFloat(c[10]), v30 = parseFloat(c[14]);
+    if (isFinite(v10)) out10.push({ d, v: v10 });
+    if (isFinite(v30)) out30.push({ d, v: v30 });
+  }
+  return { out10, out30 };
+}
+function chgOver(s: { d: string; v: number }[], obs: number) {
+  if (s.length < obs + 1) return null;
+  return { now: last(s).v, prev: s[s.length - 1 - obs].v, prevDate: s[s.length - 1 - obs].d };
+}
+async function buildJapan() {
+  const errors: string[] = [];
+  const safe = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
+    try { return await fn(); } catch (e) { errors.push(`${name}: ${(e as Error).message}`); return null; }
+  };
+  const [mofAll, mofCur, yen, us10] = await Promise.all([
+    safe("MOF-hist", () => fetchMofCsv("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/historical/jgbcme_all.csv")),
+    safe("MOF-cur", () => fetchMofCsv("https://www.mof.go.jp/english/policy/jgbs/reference/interest_rate/jgbcme.csv")),
+    safe("DEXJPUS", () => fredSeries("DEXJPUS")),
+    safe("DGS10", () => fredSeries("DGS10")),
+  ]);
+  let jgb = null;
+  if (mofAll) {
+    const a = parseMof(mofAll);
+    if (mofCur) {
+      const c = parseMof(mofCur);
+      const cut10 = a.out10.length ? last(a.out10).d : "";
+      const cut30 = a.out30.length ? last(a.out30).d : "";
+      a.out10.push(...c.out10.filter((x) => x.d > cut10));
+      a.out30.push(...c.out30.filter((x) => x.d > cut30));
+    }
+    const m10 = chgOver(a.out10, 63), m30 = chgOver(a.out30, 63); // ~3 months of trading days
+    jgb = {
+      y10: a.out10.length ? { v: last(a.out10).v, d: last(a.out10).d } : null,
+      y30: a.out30.length ? { v: last(a.out30).v, d: last(a.out30).d } : null,
+      d10_3m_bp: m10 ? +((m10.now - m10.prev) * 100).toFixed(0) : null,
+      d30_3m_bp: m30 ? +((m30.now - m30.prev) * 100).toFixed(0) : null,
+      from: m10 ? m10.prevDate : null,
+      src: "Japan MOF daily JGB yields (historical + current-month CSV)",
+    };
+  }
+  let yenOut = null;
+  if (yen && yen.length > 22) {
+    const m = chgOver(yen, 21); // ~1 month of trading days
+    yenOut = m ? {
+      usdjpy: m.now, d: last(yen).d,
+      chg_1m_pct: +((m.now / m.prev - 1) * 100).toFixed(2), // negative = yen strengthening
+      src: "FRED (DEXJPUS)",
+    } : null;
+  }
+  let diff = null;
+  if (us10 && us10.length > 64 && jgb && jgb.y10 && jgb.d10_3m_bp != null) {
+    const mu = chgOver(us10, 63);
+    if (mu) {
+      const dUs_bp = (mu.now - mu.prev) * 100;
+      diff = {
+        now_pct: +(mu.now - jgb.y10.v).toFixed(2),
+        us10: mu.now, d: last(us10).d,
+        compress_3m_bp: +(jgb.d10_3m_bp - dUs_bp).toFixed(0), // positive = US-JP gap narrowing
+        note: "3m changes computed per series by trading-day count (US and JP calendars differ)",
+        src: "FRED (DGS10) − MOF JGB 10y",
+      };
+    }
+  }
+  return { jgb, yen: yenOut, diff, errors };
+}
+
+
+// ---------- Japan carry-trade chart: CFTC CoT net spec JPY position + USD/JPY ----------
+async function buildJpChartFull() {
+  const errors: string[] = [];
+  // CFTC legacy futures-only, JPY (CME) contract code 097741, weekly since 1986-01-15
+  const cotUrl = "https://publicreporting.cftc.gov/resource/6dca-aqww.json?cftc_contract_market_code=097741&$select=report_date_as_yyyy_mm_dd,noncomm_positions_long_all,noncomm_positions_short_all&$order=report_date_as_yyyy_mm_dd%20ASC&$limit=5000";
+  const cot = await (await fetch(cotUrl, { headers: UA })).json();
+  if (!Array.isArray(cot) || !cot.length) throw new Error("CFTC CoT empty");
+  const t: string[] = [], net: number[] = [];
+  for (const r of cot) {
+    const lo = parseInt(r.noncomm_positions_long_all), sh = parseInt(r.noncomm_positions_short_all);
+    if (!isFinite(lo) || !isFinite(sh)) continue;
+    t.push(String(r.report_date_as_yyyy_mm_dd).slice(0, 10));
+    net.push(lo - sh);
+  }
+  // align USD/JPY (FRED daily) to each weekly CoT date: most recent quote on/before
+  const fx: (number | null)[] = new Array(t.length).fill(null);
+  try {
+    const yen = await fredSeries("DEXJPUS");
+    let p = 0; let lastV: number | null = null;
+    for (let i = 0; i < t.length; i++) {
+      while (p < yen.length && yen[p].d <= t[i]) { lastV = yen[p].v; p++; }
+      fx[i] = lastV;
+    }
+  } catch (e) { errors.push(`DEXJPUS: ${(e as Error).message}`); }
+  // record short + latest computed from the series itself (never hardcoded)
+  let recIdx = 0;
+  for (let i = 1; i < net.length; i++) if (net[i] < net[recIdx]) recIdx = i;
+  return {
+    t, net, fx,
+    latest: { d: t[t.length - 1], v: net[net.length - 1] },
+    record_short: { d: t[recIdx], v: net[recIdx] },
+    coverage: { from: t[0], weeks: t.length },
+    src: "CFTC Commitments of Traders (legacy, futures-only, non-commercial) via publicreporting.cftc.gov; USD/JPY: FRED DEXJPUS aligned to report dates",
+    errors,
+  };
+}
+function sliceJpChart(full: { t: string[]; net: number[]; fx: (number | null)[]; latest: unknown; record_short: unknown; coverage: unknown; src: string; errors: string[] }, range: string) {
+  const n = full.t.length;
+  const spans: Record<string, number> = { "1y": 53, "5y": 261, "all": n };
+  const keep = Math.min(spans[range] ?? 261, n);
+  const start = n - keep;
+  return {
+    t: full.t.slice(start), net: full.net.slice(start), fx: full.fx.slice(start),
+    latest: full.latest, record_short: full.record_short, coverage: full.coverage, src: full.src, errors: full.errors,
+    sampled: "weekly (CFTC report dates)",
+  };
+}
+
 // ---------- Tier 2: Claude + web search for API-less series ----------
 function aiPrompt() {
   const today = new Date().toISOString().slice(0, 10);
@@ -172,6 +416,43 @@ async function buildAI() {
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   const url = new URL(req.url);
+
+  // chart endpoint — independent of the gauges payload (surgical, no AI cost)
+  const chartRange = url.searchParams.get("chart");
+  if (chartRange) {
+    let full, tier;
+    const cc = url.searchParams.get("refresh") === "1" ? null : await cacheGet("chartfull", CHART_TTL_H);
+    if (cc) { full = cc.payload; tier = { tier: "cache", fetched_at: cc.fetched_at, age_h: cc.age_h }; }
+    else {
+      try { full = await buildChartFull(); } catch (e) {
+        return new Response(JSON.stringify({ error: `chart build failed: ${(e as Error).message}` }), { status: 502, headers: { ...CORS, "content-type": "application/json" } });
+      }
+      await cacheSet("chartfull", full);
+      tier = { tier: "live", fetched_at: new Date().toISOString() };
+    }
+    return new Response(JSON.stringify({ chart: sliceChart(full, chartRange), meta: { chart: tier, version: VERSION } }), {
+      headers: { ...CORS, "content-type": "application/json" },
+    });
+  }
+
+  // Japan carry-trade chart endpoint (weekly CoT + USD/JPY) — independent, no AI cost
+  const jchartRange = url.searchParams.get("jchart");
+  if (jchartRange) {
+    let full, tier;
+    const jcc = url.searchParams.get("refresh") === "1" ? null : await cacheGet("jpchart", JPCHART_TTL_H);
+    if (jcc) { full = jcc.payload; tier = { tier: "cache", fetched_at: jcc.fetched_at, age_h: jcc.age_h }; }
+    else {
+      try { full = await buildJpChartFull(); } catch (e) {
+        return new Response(JSON.stringify({ error: `jchart build failed: ${(e as Error).message}` }), { status: 502, headers: { ...CORS, "content-type": "application/json" } });
+      }
+      await cacheSet("jpchart", full);
+      tier = { tier: "live", fetched_at: new Date().toISOString() };
+    }
+    return new Response(JSON.stringify({ jchart: sliceJpChart(full, jchartRange), meta: { jchart: tier, version: VERSION } }), {
+      headers: { ...CORS, "content-type": "application/json" },
+    });
+  }
+
   const forceDet = url.searchParams.get("refresh") === "1";
   const forceAI = url.searchParams.get("ai") === "1";
 
@@ -185,7 +466,12 @@ Deno.serve(async (req) => {
   if (ac) { ai = ac.payload; aiMeta = { tier: "cache", fetched_at: ac.fetched_at, age_h: ac.age_h }; }
   else { ai = await buildAI(); await cacheSet("ai", ai); aiMeta = { tier: "live", fetched_at: new Date().toISOString() }; }
 
-  return new Response(JSON.stringify({ det, ai, meta: { det: detMeta, ai: aiMeta, version: "v2026:07:02-14:14" } }), {
+  let jp, jpMeta;
+  const jc = forceDet ? null : await cacheGet("japan", JP_TTL_H);
+  if (jc) { jp = jc.payload; jpMeta = { tier: "cache", fetched_at: jc.fetched_at, age_h: jc.age_h }; }
+  else { jp = await buildJapan(); await cacheSet("japan", jp); jpMeta = { tier: "live", fetched_at: new Date().toISOString() }; }
+
+  return new Response(JSON.stringify({ det, ai, jp, meta: { det: detMeta, ai: aiMeta, jp: jpMeta, version: VERSION } }), {
     headers: { ...CORS, "content-type": "application/json" },
   });
 });
