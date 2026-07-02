@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 
 /*
   TriLens — Recession & Market-Peak Monitor (PWA)
+  v22:28: (1) CoT early-warning wired into Overall Read — amber-grade only (4w short-covering >= +60k off
+  a short base; calibrated on 1986→ weekly distribution, rarest ~1% of weeks; empirically LED the yen gauge
+  before the Aug-2007 and Aug-2024 unwinds — early-but-noisier = amber lift, confirmed gauges stay the red
+  triggers). (2) Unified Lens-1 visual language everywhere: dots + mono 19px state-colored readings across
+  Lens 2, Japan Lens, Lens 3, carry chart. (3) Plain-English beginner takeaway per indicator, state-dependent.
   Backend: Supabase Edge Function `trilens-data` on project pvqwpzbjremcyobnsldd
   Tiers:  DET  = deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl)
           AI   = Claude + live web search, ONLY for series with no free API
@@ -10,7 +15,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-19:32";
+const APP_VERSION = "v2026:07:02-22:28";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -38,36 +43,42 @@ function lens1Rows(det, ai) {
     { name: "Yield Curve", sub: "10yr − 3mo Treasury spread", tier: "DET",
       note: "Inverted before every U.S. recession since the 1960s, ~12–18mo lead.",
       rule: "Green ≥ +0.25 · Amber 0 to +0.25 · Red < 0",
+      tips: { green: "The bond market sees no recession ahead.", amber: "The bond market’s warning light is flickering.", red: "The bond market is flashing a recession warning." },
       v: num(det?.yc?.v), meta: det?.yc,
       fmt: (v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`,
       st: (v) => (v >= 0.25 ? "green" : v >= 0 ? "amber" : "red") },
     { name: "Sahm Rule", sub: "jobs momentum", tier: "DET",
       note: "Fires when 3-mo avg unemployment rises 0.5pt off its 12-mo low. Caught every recession start since 1970.",
       rule: "Green < 0.35 · Amber 0.35–0.49 · Red ≥ 0.50 (official trigger)",
+      tips: { green: "The job market is healthy — no recession signal.", amber: "Jobs are softening — watch closely.", red: "This jobs signal says a recession has likely already begun." },
       v: num(det?.sahm?.v), meta: det?.sahm,
       fmt: (v) => v.toFixed(2),
       st: (v) => (v >= 0.5 ? "red" : v >= 0.35 ? "amber" : "green") },
     { name: "High-Yield Credit Spreads", sub: "HY OAS", tier: "DET",
       note: "Cleanest market stress gauge; blows out into downturns. Very tight = complacency.",
       rule: "Green < 4.0% · Amber 4.0–5.5% · Red > 5.5%",
+      tips: { green: "Lenders are calm — no stress in credit markets.", amber: "Lenders are getting nervous — credit stress rising.", red: "Credit markets are in trouble — a serious warning." },
       v: num(det?.hy?.v), meta: det?.hy,
       fmt: (v) => `${v.toFixed(2)}%`,
       st: (v) => (v > 5.5 ? "red" : v >= 4 ? "amber" : "green") },
     { name: "ISM Manufacturing PMI", sub: "factory activity", tier: "AI",
       note: "Below 50 = contraction.",
       rule: "Green ≥ 50 · Amber 47–49.9 · Red < 47",
+      tips: { green: "Factories are growing — the economy has momentum.", amber: "Factories are slowing down.", red: "Factories are shrinking — the economy is losing steam." },
       v: num(ai?.ism?.v), meta: ai?.ism,
       fmt: (v) => v.toFixed(1),
       st: (v) => (v >= 50 ? "green" : v >= 47 ? "amber" : "red") },
     { name: "Conference Board LEI", sub: "6-month % change", tier: "AI",
       note: "Built to lead the cycle; deep sustained declines precede recessions.",
       rule: "Green > 0 · Amber −3% to 0 · Red < −3%",
+      tips: { green: "The forward-looking gauges point to growth.", amber: "The forward-looking gauges are soft, but not recessionary.", red: "The forward-looking gauges point to a downturn." },
       v: num(ai?.lei?.v), meta: ai?.lei,
       fmt: (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}% (6m)${num(ai?.lei?.lvl) !== null ? ` · lvl ${ai.lei.lvl}` : ""}`,
       st: (v) => (v > 0 ? "green" : v >= -3 ? "amber" : "red") },
     { name: "Labor Market", sub: "unemployment vs 12-mo low", tier: "DET",
       note: "Rising unemployment off the cycle low is the classic pre-recession tell.",
       rule: "Green < +0.2pt off low · Amber +0.2–0.49 · Red ≥ +0.5",
+      tips: { green: "Unemployment is near its lows — all clear.", amber: "Unemployment is creeping up — early caution.", red: "Unemployment is rising fast — a classic recession sign." },
       v: num(det?.labor?.off_low), meta: det?.labor,
       fmt: (v) => `+${v.toFixed(1)}pt off low`,
       extra: det?.labor ? `UR ${det.labor.ur}%${num(det.labor.pay_k) !== null ? ` · payrolls ${det.labor.pay_k > 0 ? "+" : ""}${det.labor.pay_k}k` : ""}` : null,
@@ -75,6 +86,7 @@ function lens1Rows(det, ai) {
     { name: "Valuation", sub: "Shiller CAPE", tier: "DET",
       note: "Not a timing tool — predicts weak long-run returns, not the turn date.",
       rule: "Green < 25 · Amber 25–32 · Red > 32",
+      tips: { green: "Stocks are reasonably priced by history.", amber: "Stocks are pricey — long-run returns likely lower.", red: "Stocks are very expensive by history — but this alone never times a crash." },
       v: num(det?.cape?.v), meta: det?.cape,
       fmt: (v) => `~${v.toFixed(1)}`,
       st: (v) => (v > 32 ? "red" : v >= 25 ? "amber" : "green") },
@@ -89,30 +101,40 @@ function lens2Rows(det, ai) {
   const vg = det?.vg, sloos = det?.sloos;
   const rows = [
     { name: "Consumer Confidence > 110", sub: "Conference Board index", tier: "AI", rule: "Triggered if > 110",
+      tipT: "Consumers are euphoric — a mood common near market tops.", tipN: "Consumers are not euphoric — this top-marker is quiet.",
       v: num(ai?.cc?.v), meta: ai?.cc, disp: (v) => v.toFixed(1), trig: (v) => v > 110 },
     { name: "Retail Euphoria", sub: "AAII % bulls", tier: "AI", rule: "Triggered if bulls > 40%",
+      tipT: "Small investors are unusually bullish — historically a contrarian warning.", tipN: "Small investors are not euphoric.",
       v: num(ai?.aaii?.v), meta: ai?.aaii, disp: (v) => `${v.toFixed(1)}% bulls`, trig: (v) => v > 40 },
     { name: "Manager Bullishness", sub: "NAAIM equity exposure", tier: "AI", rule: "Triggered if > 90 (all-in)",
+      tipT: "Professional managers are nearly all-in — little cash left to push prices higher.", tipN: "Managers still hold cash — not all-in yet.",
       v: num(ai?.naaim?.v), meta: ai?.naaim, disp: (v) => v.toFixed(1), trig: (v) => v > 90 },
     { name: "Growth-Expectation Froth", sub: "S&P 500 forward P/E", tier: "AI", rule: "Triggered if > 19× (vs ~16–18× long-run avg)",
+      tipT: "Investors are paying a premium for future profits — stocks are expensive.", tipN: "Pricing of future profits is not extreme.",
       v: num(ai?.fpe?.v), meta: ai?.fpe, disp: (v) => `${v.toFixed(1)}×`, trig: (v) => v > 19 },
     { name: "Deal & IPO Froth", sub: "M&A + IPO issuance", tier: "AI", rule: "Triggered if at/near record volume",
+      tipT: "Wall Street deal-making is at fever pitch — classic late-cycle behavior.", tipN: "Deal-making is not at a frenzy.",
       v: ai?.deal?.t === true ? 1 : ai?.deal?.t === false ? 0 : null, meta: ai?.deal,
       disp: () => (ai?.deal?.t ? "Record pace" : "Not at records"), qual: ai?.deal?.e, trig: (v) => v === 1 },
     { name: "Rule of 20", sub: "trailing P/E + CPI YoY", tier: "DET", rule: "Triggered if sum > 20",
+      tipT: "Price plus inflation says the market is running hot.", tipN: "Price plus inflation is not in the danger zone.",
       v: rule20, meta: det?.tpe ? { d: `${det?.tpe?.d} + CPI ${det?.cpi_yoy?.d ?? ""}`, src: "multpl.com + FRED (computed)" } : null,
       disp: (v) => `${v} (P/E ${tpe} + CPI ${cpi}%)`, trig: (v) => v > 20 },
     { name: "Value vs Growth (6m)", sub: "RPV vs RPG total return", tier: "DET",
       rule: "Triggered if growth leads (late-cycle speculation); eased if value leads",
+      tipT: "Speculative growth stocks are leading — a late-cycle pattern.", tipN: "Steadier value stocks are leading — speculation is cooling.",
       v: vg ? (vg.lead === "growth" ? 1 : 0) : null, meta: vg,
       disp: () => `${vg.lead === "growth" ? "Growth" : "Value"} leads · V ${vg.value_6m > 0 ? "+" : ""}${vg.value_6m}% vs G ${vg.growth_6m > 0 ? "+" : ""}${vg.growth_6m}%`,
       trig: (v) => v === 1 },
     { name: "Inverted Yield Curve", sub: "same 10y−3m as Lens 1", tier: "DET", rule: "Triggered if spread < 0",
+      tipT: "The bond market’s recession warning is ON.", tipN: "No inversion — the bond market is not warning here.",
       v: num(det?.yc?.v), meta: det?.yc, disp: (v) => `${v > 0 ? "+" : ""}${v.toFixed(2)}%`, trig: (v) => v < 0 },
     { name: "Credit Complacency", sub: "Chicago Fed NFCI", tier: "DET", rule: "Triggered if < 0 (looser-than-average conditions)",
+      tipT: "Money is unusually easy — complacency like this builds before turns.", tipN: "Financial conditions are not unusually loose.",
       v: num(det?.nfci?.v), meta: det?.nfci, disp: (v) => v.toFixed(2), trig: (v) => v < 0 },
     { name: "Tightening Credit", sub: "Fed SLOOS, net % tightening C&I", tier: "DET",
       rule: "Triggered if net tightening > 0 and rising",
+      tipT: "Banks are making loans harder to get — credit is tightening.", tipN: "Banks are still lending freely.",
       v: num(sloos?.v), meta: sloos,
       disp: (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}% net · ${sloos.dir} (prev ${sloos.prev > 0 ? "+" : ""}${sloos.prev}%)`,
       trig: (v) => v > 0 && sloos?.dir === "rising" },
@@ -333,8 +355,14 @@ function japanWorst(jp) {
     yenApp == null ? null : yenApp >= 6 ? "red" : yenApp >= 3 ? "amber" : "green",
     compV == null ? null : compV >= 100 ? "red" : compV >= 50 ? "amber" : "green",
   ].filter(Boolean);
-  if (!st.length) return "na";
-  return st.includes("red") ? "red" : st.includes("amber") ? "amber" : "green";
+  const worst = !st.length ? "na" : st.includes("red") ? "red" : st.includes("amber") ? "amber" : "green";
+  // CoT early-warning (amber-grade, never red): 4-week spec short-covering >= +60k contracts off a short base.
+  // Calibrated on the full 1986→ weekly distribution (~1% of weeks). Verified against history: this signal
+  // fired BEFORE the yen gauge crossed amber ahead of both the Aug-2007 and Aug-2024 unwinds — but it also
+  // fires in some benign covering episodes (2003, 2006, 2011), so it lifts green→amber only.
+  const cot = jp?.cot;
+  const cotUnwind = !!(cot && typeof cot.chg_4w === "number" && cot.chg_4w >= 60000 && cot.was_short);
+  return { worst, cotUnwind };
 }
 
 /* Carry-trade chart: CFTC CoT net non-commercial JPY futures position (weekly, 1986→) + USD/JPY.
@@ -434,7 +462,7 @@ function JapanCarryChart() {
         <path d={area} fill={C.gold} opacity="0.22" />
         <path d={line} fill="none" stroke={C.gold} strokeWidth="1.6" />
         <line x1={m.l} x2={W - m.r} y1={yN(0)} y2={yN(0)} stroke={C.mute} strokeWidth="1" strokeDasharray="4 4" />
-        <text x={m.l + 4} y={yN(0) - 5} fontSize="9.5" fill={C.mute} fontFamily={MONO}>0 \u2014 below = net SHORT yen = carry ON</text>
+        <text x={m.l + 4} y={yN(0) - 5} fontSize="9.5" fill={C.mute} fontFamily={MONO}>0 — below = net SHORT yen = carry ON</text>
         {fxPath && <path d={fxPath} fill="none" stroke={C.blue} strokeWidth="1.4" opacity="0.9" />}
         {recIdx >= 0 && (
           <g>
@@ -447,14 +475,14 @@ function JapanCarryChart() {
     );
     head = (
       <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, marginBottom: 6 }}>
-        Net spec JPY position: <span style={{ color: C.gold, fontWeight: 600 }}>{j.latest.v.toLocaleString()}</span> contracts ({j.latest.d})
+        Net spec JPY position: <span style={{ color: C.gold, fontWeight: 600, fontSize: 19 }}>{j.latest.v.toLocaleString()}</span> contracts ({j.latest.d})
         <span style={{ color: C.faint }}> · all-time record short {j.record_short.v.toLocaleString()} ({j.record_short.d})</span>
       </div>
     );
     disclosure = (
       <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.faint, marginTop: 6, lineHeight: 1.7 }}>
-        {j.sampled} · net = non-commercial long \u2212 short futures contracts · coverage from {j.coverage.from} ({j.coverage.weeks} weeks) · latest/record/trend computed from the full series, never hardcoded
-        <br />conclusion rules (calibrated on the full 1986\u2192 distribution): net \u2265 0 unwound · 4w covering \u2265 +60k red (\u2248 rarest 1% of weeks) · \u2265 +25k amber (\u2248 top 8%) · 13w build \u2264 \u221220k building · percentile \u2265 95 historic extreme
+        {j.sampled} · net = non-commercial long − short futures contracts · coverage from {j.coverage.from} ({j.coverage.weeks} weeks) · latest/record/trend computed from the full series, never hardcoded
+        <br />conclusion rules (calibrated on the full 1986→ distribution): net ≥ 0 unwound · 4w covering ≥ +60k red (≈ rarest 1% of weeks) · ≥ +25k amber (≈ top 8%) · 13w build ≤ −20k building · percentile ≥ 95 historic extreme
         <br />src: {j.src}
         {j.errors?.length > 0 && <span style={{ color: C.amber }}> · warnings: {j.errors.join(" · ")}</span>}
       </div>
@@ -472,8 +500,8 @@ function JapanCarryChart() {
           </button>
         ))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 12, fontFamily: MONO, fontSize: 9.5, color: C.mute }}>
-          <span><span style={{ color: C.gold }}>\u25a0</span> net JPY position (left)</span>
-          <span><span style={{ color: C.blue }}>\u2014</span> USD/JPY (right)</span>
+          <span><span style={{ color: C.gold }}>■</span> net JPY position (left)</span>
+          <span><span style={{ color: C.blue }}>—</span> USD/JPY (right)</span>
         </div>
       </div>
       {head}
@@ -481,7 +509,7 @@ function JapanCarryChart() {
       {cur.status === "loading" && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 24, color: C.mute, fontSize: 13 }}>
           <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${C.line}`, borderTopColor: C.blue, display: "inline-block", animation: "spin .8s linear infinite" }} />
-          Loading CFTC positioning history\u2026
+          Loading CFTC positioning history…
         </div>
       )}
       {cur.status === "error" && (
@@ -516,6 +544,7 @@ function JapanLens({ jp }) {
       name: "JGB Tightening Shock", sub: "10y & 30y JGB yields, 3-month change",
       note: "Fast JGB yield rises squeeze the yen carry trade and pull global long rates up. Speed matters, not level — 2025's slow rise was orderly; the danger is a spike.",
       rule: "Green < +40bp · Amber +40–79bp · Red ≥ +80bp (max of 10y/30y over 3m)",
+      tips: { green: "Japanese rates are rising slowly — manageable.", amber: "Japanese rates are rising fast — pressure building on the carry trade.", red: "Japanese rate shock — high risk of global spillover." },
       v: jgbV,
       display: jgbV != null && jgb ? `10y ${bp(jgb.d10_3m_bp)}${jgb.d30_3m_bp != null ? ` · 30y ${bp(jgb.d30_3m_bp)}` : ""}` : null,
       extra: jgb?.y10 ? `10y ${jgb.y10.v}% · 30y ${jgb.y30 ? jgb.y30.v + "%" : "n/a"}` : null,
@@ -526,6 +555,7 @@ function JapanLens({ jp }) {
       name: "Yen Shock", sub: "USD/JPY, 1-month move",
       note: "Sharp yen strengthening is the unwind actually happening — the Aug 2024 flash crash saw ~8–12% yen appreciation in weeks. Yen weakening = carry being added (tinderbox grows).",
       rule: "Green < 3% yen appreciation/1m · Amber 3–5.9% · Red ≥ 6%",
+      tips: { green: "The yen is calm — the big unwind is NOT happening.", amber: "The yen is strengthening — unwind pressure is building.", red: "The yen is surging — the unwind is happening NOW (Aug-2024-type risk)." },
       v: yenApp,
       display: yenApp != null && yen ? `¥${yen.usdjpy}/USD · yen ${yenApp > 0 ? "+" : ""}${yenApp}% 1m (${yenApp > 0 ? "strengthening" : "weakening"})` : null,
       st: (v) => (v >= 6 ? "red" : v >= 3 ? "amber" : "green"),
@@ -535,6 +565,7 @@ function JapanLens({ jp }) {
       name: "US−JP Yield Gap Compression", sub: "10y differential, 3-month change",
       note: "The gap is what makes the carry trade pay. Rapid compression (BOJ hiking into a Fed pivot) erodes it and pressures positions to unwind.",
       rule: "Green < +50bp compression/3m · Amber +50–99bp · Red ≥ +100bp",
+      tips: { green: "The carry trade’s pay-off is intact.", amber: "The carry trade’s pay-off is shrinking — pressure to exit.", red: "The carry trade’s pay-off is collapsing — forced exits likely." },
       v: compV,
       display: compV != null && diff ? `US−JP ${diff.now_pct}% · ${compV >= 0 ? "compressed" : "widened"} ${Math.abs(compV)}bp 3m` : null,
       st: (v) => (v >= 100 ? "red" : v >= 50 ? "amber" : "green"),
@@ -567,11 +598,12 @@ function JapanLens({ jp }) {
               <div style={{ fontSize: 12.5, color: C.mute, marginTop: 3 }}>{r.note}</div>
               <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 5 }}>rule: {r.rule}</div>
               <SourceLine meta={r.meta} tier="DET" />
+              {r.tips && r.state !== "na" && <div style={{ fontSize: 12.5, color: dotColor(r.state), marginTop: 6 }}>→ {r.tips[r.state]}</div>}
             </div>
             <div style={{ textAlign: "right", minWidth: 130, marginLeft: "auto", maxWidth: "100%" }}>
               {r.display === null ? <Unavailable /> : (
                 <>
-                  <div style={{ fontFamily: MONO, fontSize: 14.5, fontWeight: 600, color: dotColor(r.state) }}>{r.display}</div>
+                  <div style={{ fontFamily: MONO, fontSize: 19, fontWeight: 600, color: dotColor(r.state) }}>{r.display}</div>
                   {r.extra && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.mute, marginTop: 2 }}>{r.extra}</div>}
                 </>
               )}
@@ -635,9 +667,10 @@ export default function App() {
     let txt = `${econ} · ${froth} · ${trend}${verdict}`;
     // Japan Lens = OVERRIDE/AMPLIFIER, not a fourth averaged input: an unwind is a fast coincident
     // shock (Aug 2024: Lens 1 green, trend intact until the same week) and must never be diluted.
-    const jpW = japanWorst(state.data?.jp);
-    if (jpW === "red") { col = C.red; txt += " ⚠ Japan carry unwind in progress — Aug-2024-type shock risk."; }
-    else if (jpW === "amber") { if (col === C.green) col = C.amber; txt += " · Japan channel pressure building."; }
+    const jpS = japanWorst(state.data?.jp);
+    if (jpS.worst === "red") { col = C.red; txt += " ⚠ Japan carry unwind in progress — Aug-2024-type shock risk."; }
+    else if (jpS.worst === "amber") { if (col === C.green) col = C.amber; txt += " · Japan channel pressure building."; }
+    if (jpS.cotUnwind) { if (col === C.green) col = C.amber; txt += " · Spec yen shorts covering at historic speed — early unwind warning."; }
     return { txt, col };
   })();
 
@@ -718,6 +751,7 @@ export default function App() {
                     <div style={{ fontSize: 12.5, color: C.mute, marginTop: 3 }}>{r.note}</div>
                     <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 5 }}>rule: {r.rule}</div>
                     <SourceLine meta={r.meta} tier={r.tier} />
+                    {r.tips && r.state !== "na" && <div style={{ fontSize: 12.5, color: dotColor(r.state), marginTop: 6 }}>→ {r.tips[r.state]}</div>}
                   </div>
                   <div style={{ textAlign: "right", minWidth: 110, marginLeft: "auto", maxWidth: "100%" }}>
                     {r.display === null ? <Unavailable /> : (
@@ -756,19 +790,21 @@ export default function App() {
 
             <div style={{ display: "grid", gap: 8 }}>
               {rows2.map((r) => (
-                <div key={r.name} style={{ background: C.panelSoft, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                <div key={r.name} style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 16px", display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                  <Dot s={r.state === "trig" ? "red" : r.state === "not" ? "green" : "na"} />
                   <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14.5 }}>{r.name}</div>
                     <div style={{ fontSize: 12, color: C.mute, marginTop: 2 }}>{r.sub}</div>
                     {r.qual && <div style={{ fontSize: 11.5, color: C.mute, marginTop: 3, fontStyle: "italic" }}>{r.qual}</div>}
                     <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 4 }}>rule: {r.rule}</div>
                     <SourceLine meta={r.meta} tier={r.tier} />
+                    {r.state !== "na" && <div style={{ fontSize: 12.5, color: dotColor(r.state === "trig" ? "red" : "green"), marginTop: 6 }}>→ {r.state === "trig" ? r.tipT : r.tipN}</div>}
                   </div>
                   <div style={{ textAlign: "right", minWidth: 130, marginLeft: "auto" }}>
                     {r.display === null ? <Unavailable /> : (
                       <>
-                        <div style={{ fontFamily: MONO, fontSize: 13.5, color: C.text }}>{r.display}</div>
-                        <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 600, marginTop: 3, color: r.state === "trig" ? C.red : C.faint }}>
+                        <div style={{ fontFamily: MONO, fontSize: 19, fontWeight: 600, color: dotColor(r.state === "trig" ? "red" : "green") }}>{r.display}</div>
+                        <div style={{ fontFamily: MONO, fontSize: 11.5, fontWeight: 600, marginTop: 3, color: r.state === "trig" ? C.red : C.green }}>
                           {r.state === "trig" ? "● Triggered" : "○ Not yet / eased"}
                         </div>
                       </>
@@ -795,13 +831,14 @@ export default function App() {
                   <div style={{ fontFamily: MONO, fontSize: 12.5, marginTop: 10, color: C.text }}>
                     S&amp;P 500 {t3.px !== null ? t3.px.toLocaleString() : "—"} · 50d {t3.s50.toLocaleString()} ({t3.sl50 || "slope n/a"}) · 150d {t3.s150.toLocaleString()} ({t3.sl150 || "slope n/a"})
                     <SourceLine meta={det?.trend} tier="DET" />
+                    {t3.state !== "na" && <div style={{ fontSize: 12.5, color: dotColor(t3.state), marginTop: 6 }}>→ {t3.state === "green" ? "The uptrend is intact — no sell signal." : t3.state === "amber" ? "The trend is wobbling but the break is not confirmed." : "The trend is broken — the historic ‘get defensive’ signal."}</div>}
                   </div>
                 ) : (
                   <div style={{ marginTop: 10 }}><Unavailable /></div>
                 )}
               </div>
               <div style={{ textAlign: "right", minWidth: 110, marginLeft: "auto" }}>
-                <div style={{ fontFamily: MONO, fontSize: 16, fontWeight: 600, color: dotColor(t3.state) }}>
+                <div style={{ fontFamily: MONO, fontSize: 19, fontWeight: 600, color: dotColor(t3.state) }}>
                   {t3.state === "green" ? "UPTREND" : t3.state === "amber" ? "UNCONFIRMED" : t3.state === "red" ? "TREND BREAK" : "—"}
                 </div>
               </div>

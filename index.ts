@@ -1,4 +1,7 @@
-// trilens-data v2026:07:02-19:29 — data backend for TriLens PWA
+// trilens-data v2026:07:02-22:22 — data backend for TriLens PWA
+// v22:22: jp block gains `cot` — latest CFTC net spec JPY position + 4-week change + was_short flag,
+//   powering the amber-grade "early unwind warning" banner input (calibrated: 4w covering >= +60k off a
+//   short base = rarest ~1% of weeks since 1986; empirically LED the yen gauge before Aug 2007 and Aug 2024).
 // v19:48: jchart now returns COMPUTED trend fields for the carry conclusion — chg_4w, chg_13w,
 //   pctile_more_short (share of all weeks since 1986 with a less-short net position than today).
 //   Client thresholds were calibrated on this full distribution: 4w covering >= +60k contracts occurred
@@ -35,7 +38,7 @@ const CORS = {
 };
 const UA = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" };
 const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6, JPCHART_TTL_H = 12;
-const VERSION = "v2026:07:02-19:29";
+const VERSION = "v2026:07:02-22:22";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -331,7 +334,20 @@ async function buildJapan() {
       };
     }
   }
-  return { jgb, yen: yenOut, diff, errors };
+  let cot = null;
+  try {
+    const cotUrl = "https://publicreporting.cftc.gov/resource/6dca-aqww.json?cftc_contract_market_code=097741&$select=report_date_as_yyyy_mm_dd,noncomm_positions_long_all,noncomm_positions_short_all&$order=report_date_as_yyyy_mm_dd%20DESC&$limit=6";
+    const rows = await (await fetch(cotUrl, { headers: UA })).json();
+    if (Array.isArray(rows) && rows.length >= 5) {
+      const nets = rows.map((r: { noncomm_positions_long_all: string; noncomm_positions_short_all: string }) => parseInt(r.noncomm_positions_long_all) - parseInt(r.noncomm_positions_short_all));
+      cot = {
+        net: nets[0], d: String(rows[0].report_date_as_yyyy_mm_dd).slice(0, 10),
+        chg_4w: nets[0] - nets[4], was_short: nets[4] < 0,
+        src: "CFTC CoT non-commercial JPY futures (weekly)",
+      };
+    }
+  } catch (e) { errors.push(`CoT: ${(e as Error).message}`); }
+  return { jgb, yen: yenOut, diff, cot, errors };
 }
 
 
