@@ -2,6 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 
 /*
   TriLens — Recession & Market-Peak Monitor (PWA)
+  v07:43: Lens-3 summary row now reports the MOVING-AVERAGE DIRECTION (computed from backend sl50/sl150
+  slopes; both rising = UP, both falling = DOWN, else mixed) with raw slopes shown — dot still follows
+  t3.state so it can never contradict the banner. Japan moved out of the lens list into its own
+  "ADDITIONAL WATCH" sub-section after the three lenses (override/amplifier, per disclosed methodology).
+  v07:38: LENS SUMMARY panel below the Overall Read — one state-dotted beginner line per lens (1/2/3/Japan)
+  with live computed counts. Reuses the banner's own aggregates (l1Band/frothBand/t3/japanWorst) so the
+  summary can never diverge from the banner; jpS hoisted out of the banner IIFE (computed once).
   v22:28: (1) CoT early-warning wired into Overall Read — amber-grade only (4w short-covering >= +60k off
   a short base; calibrated on 1986→ weekly distribution, rarest ~1% of weeks; empirically LED the yen gauge
   before the Aug-2007 and Aug-2024 unwinds — early-but-noisier = amber lift, confirmed gauges stay the red
@@ -15,7 +22,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:02-22:28";
+const APP_VERSION = "v2026:07:03-07:43";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -653,6 +660,9 @@ export default function App() {
   const l1Reds = rows1.filter((r) => r.state === "red").length;
   const l1Band = !l1Evald ? "na" : l1Reds >= 3 ? "red" : l1Reds >= 1 ? "amber" : "green";
 
+  const jpS = japanWorst(state.data?.jp);
+  const jpEff = jpS.worst === "green" && jpS.cotUnwind ? "amber" : jpS.worst; // banner-lift semantics
+
   const banner = (() => {
     if (l1Band === "na" && frothBand === "na" && t3.state === "na")
       return { txt: state.status === "loading" ? "Loading readings…" : "No readings available.", col: C.mute };
@@ -667,7 +677,6 @@ export default function App() {
     let txt = `${econ} · ${froth} · ${trend}${verdict}`;
     // Japan Lens = OVERRIDE/AMPLIFIER, not a fourth averaged input: an unwind is a fast coincident
     // shock (Aug 2024: Lens 1 green, trend intact until the same week) and must never be diluted.
-    const jpS = japanWorst(state.data?.jp);
     if (jpS.worst === "red") { col = C.red; txt += " ⚠ Japan carry unwind in progress — Aug-2024-type shock risk."; }
     else if (jpS.worst === "amber") { if (col === C.green) col = C.amber; txt += " · Japan channel pressure building."; }
     if (jpS.cotUnwind) { if (col === C.green) col = C.amber; txt += " · Spec yen shorts covering at historic speed — early unwind warning."; }
@@ -716,6 +725,52 @@ export default function App() {
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.faint, marginBottom: 6 }}>OVERALL READ</div>
           <div style={{ fontSize: 15, color: banner.col, fontWeight: 500 }}>{banner.txt}</div>
         </div>
+
+        {/* per-lens summary — same aggregates and Japan override semantics as the banner above */}
+        {(l1Band !== "na" || frothBand !== "na" || t3.state !== "na" || jpS.worst !== "na") && (
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "14px 16px", marginTop: 10 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.faint, marginBottom: 4 }}>LENS SUMMARY</div>
+            {[
+              { key: "L1", name: "LENS 1 · ECONOMY", s: l1Band,
+                detail: l1Evald ? `${rows1.filter((r) => r.state === "green").length} green · ${rows1.filter((r) => r.state === "amber").length} amber · ${l1Reds} red of ${l1Evald}` : null,
+                tip: l1Band === "green" ? "No recession signals from the economy." : l1Band === "amber" ? "Some economic warning lights are on — not a recession call yet." : l1Band === "red" ? "Multiple recession signals are firing." : "No data." },
+              { key: "L2", name: "LENS 2 · FROTH", s: frothBand === "peak" ? "red" : frothBand === "building" ? "amber" : frothBand === "low" ? "green" : "na",
+                detail: frothPct !== null ? `${trigd.length}/${evald.length} triggered (${frothPct}%)` : null,
+                tip: frothBand === "low" ? "The mood is calm — not how tops usually look." : frothBand === "building" ? "Speculative behavior is building." : frothBand === "peak" ? "Looks and feels like previous peaks — fragile, but froth alone doesn’t time the fall." : "No data." },
+              { key: "L3", name: "LENS 3 · PRICE TREND", s: t3.state,
+                detail: t3.sl50 && t3.sl150 ? `50d ${t3.sl50} · 150d ${t3.sl150}` : null,
+                tip: (t3.sl50 && t3.sl150
+                  ? (t3.sl50 === "rising" && t3.sl150 === "rising" ? "Moving averages trending UP. "
+                    : t3.sl50 === "falling" && t3.sl150 === "falling" ? "Moving averages trending DOWN. "
+                    : "Moving averages mixed. ")
+                  : "")
+                  + (t3.state === "green" ? "The uptrend is intact — no sell signal."
+                    : t3.state === "amber" ? "The trend is wobbling but the break is not confirmed."
+                    : t3.state === "red" ? "The trend is broken — the historic ‘get defensive’ signal."
+                    : "No data.") },
+            ].map((L) => (
+              <div key={L.key} style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start", padding: "8px 0", borderTop: `1px solid ${C.line}` }}>
+                <Dot s={L.s} />
+                <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                  <div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: 1, color: C.mute }}>{L.name}</div>
+                  <div style={{ fontSize: 12.5, color: dotColor(L.s), marginTop: 3 }}>{L.tip}</div>
+                </div>
+                {L.detail && <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.faint, marginLeft: "auto", textAlign: "right" }}>{L.detail}</div>}
+              </div>
+            ))}
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.faint, margin: "12px 0 0", paddingTop: 12, borderTop: `1px solid ${C.line}` }}>
+              ADDITIONAL WATCH · JAPAN CARRY TRADE <span style={{ letterSpacing: 0.5 }}>(override/amplifier — not averaged into the three lenses)</span>
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start", padding: "8px 0 0" }}>
+              <Dot s={jpEff} />
+              <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, color: dotColor(jpEff), marginTop: 3 }}>
+                  {(jpS.worst === "red" ? "Carry unwind in progress — Aug-2024-type shock risk." : jpS.worst === "amber" ? "Pressure building in the Japan channel." : jpS.worst === "green" ? "The carry trade is quiet — no unwind under way." : "No data.") + (jpS.cotUnwind ? " Early warning: yen shorts covering at historic speed." : "")}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* signal map — fetches independently so it renders even if the gauges block fails */}
         <ChartSection frothPct={frothPct} />
