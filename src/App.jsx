@@ -2,6 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 
 /*
   TriLens — Recession & Market-Peak Monitor (PWA)
+  v13:40: (1) Overall Read shows its data as-of time — the OLDEST fetched_at across det/AI/Japan blocks
+  (honest: server cache means render time ≠ data time). (2) Japan watch moved to its own JAPAN WATCH line
+  in the banner. (3) One canonical jpMessage() now feeds the banner, Lens Summary AND the Japan section
+  read line — the three previously-drifting phrasings are permanently aligned, with a beginner insight
+  in the amber state explaining what "pressure building" means. Banner color-override logic unchanged.
   v07:43: Lens-3 summary row now reports the MOVING-AVERAGE DIRECTION (computed from backend sl50/sl150
   slopes; both rising = UP, both falling = DOWN, else mixed) with raw slopes shown — dot still follows
   t3.state so it can never contradict the banner. Japan moved out of the lens list into its own
@@ -22,7 +27,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:03-07:43";
+const APP_VERSION = "v2026:07:04-13:40";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -372,6 +377,19 @@ function japanWorst(jp) {
   return { worst, cotUnwind };
 }
 
+// One canonical Japan-watch message consumed by the banner, the Lens Summary and the Japan section —
+// three hand-written phrasings previously drifted apart; a single source keeps them aligned forever.
+// eff = effective display state (banner-lift semantics: green + CoT early-warning renders amber).
+function jpMessage(jpS) {
+  const eff = jpS.worst === "green" && jpS.cotUnwind ? "amber" : jpS.worst;
+  const base =
+    jpS.worst === "red" ? "Carry unwind IN PROGRESS — borrowed-yen bets are being forced shut worldwide. Aug-2024-type shock risk." :
+    jpS.worst === "amber" ? "Pressure building — rising Japanese rates / a firmer yen are squeezing the profit on borrowed-yen bets. Not an unwind yet, but the fuel for one is accumulating; watch the yen for the spark." :
+    jpS.worst === "green" ? "Quiet — the carry trade is intact, no unwind under way." :
+    "No readings available.";
+  return { eff, txt: base + (jpS.cotUnwind ? " EARLY WARNING: speculators are covering yen shorts at historic speed." : "") };
+}
+
 /* Carry-trade chart: CFTC CoT net non-commercial JPY futures position (weekly, 1986→) + USD/JPY.
    Net SHORT yen (below zero) = carry trade ON. Record short and latest are COMPUTED server-side
    from the full series — never hardcoded. Hand-rolled SVG, no new dependencies. */
@@ -581,13 +599,9 @@ function JapanLens({ jp }) {
   ].map((r) => ({ ...r, state: r.v === null ? "na" : r.st(r.v) }));
 
   const states = rows.map((r) => r.state);
-  const read = states.includes("red")
-    ? { txt: "Carry unwind in progress — historically coincides with sharp global drawdowns (Aug 2024 pattern).", col: C.red }
-    : states.includes("amber")
-    ? { txt: "Watch — tightening / unwind pressure building in the Japan channel.", col: C.amber }
-    : states.includes("na") && !states.includes("green")
-    ? { txt: "No readings available for the Japan channel.", col: C.mute }
-    : { txt: "Tinderbox growing, no spark — carry intact, no unwind underway. Watch the yen for the reversal.", col: C.green };
+  // Canonical message via jpMessage() — identical to the banner and Lens Summary by construction.
+  const jpM = jpMessage(japanWorst(jp));
+  const read = { txt: jpM.txt, col: jpM.eff === "na" ? C.mute : dotColor(jpM.eff) };
 
   return (
     <div>
@@ -661,7 +675,7 @@ export default function App() {
   const l1Band = !l1Evald ? "na" : l1Reds >= 3 ? "red" : l1Reds >= 1 ? "amber" : "green";
 
   const jpS = japanWorst(state.data?.jp);
-  const jpEff = jpS.worst === "green" && jpS.cotUnwind ? "amber" : jpS.worst; // banner-lift semantics
+  const jpM = jpMessage(jpS);
 
   const banner = (() => {
     if (l1Band === "na" && frothBand === "na" && t3.state === "na")
@@ -677,10 +691,17 @@ export default function App() {
     let txt = `${econ} · ${froth} · ${trend}${verdict}`;
     // Japan Lens = OVERRIDE/AMPLIFIER, not a fourth averaged input: an unwind is a fast coincident
     // shock (Aug 2024: Lens 1 green, trend intact until the same week) and must never be diluted.
-    if (jpS.worst === "red") { col = C.red; txt += " ⚠ Japan carry unwind in progress — Aug-2024-type shock risk."; }
-    else if (jpS.worst === "amber") { if (col === C.green) col = C.amber; txt += " · Japan channel pressure building."; }
-    if (jpS.cotUnwind) { if (col === C.green) col = C.amber; txt += " · Spec yen shorts covering at historic speed — early unwind warning."; }
-    return { txt, col };
+    if (jpS.worst === "red") col = C.red;
+    else if (jpS.worst === "amber" && col === C.green) col = C.amber;
+    if (jpS.cotUnwind && col === C.green) col = C.amber;
+    return { txt, col, jp: { txt: jpM.txt, col: dotColor(jpM.eff) } };
+  })();
+
+  // Honest banner timestamp: the OLDEST fetched_at among the blocks feeding the read — server-side
+  // cache means data time ≠ render time; the weakest link defines the read's freshness.
+  const bannerAsOf = (() => {
+    const ts = [meta?.det, meta?.ai, meta?.jp].filter((m) => m && m.fetched_at).map((m) => new Date(m.fetched_at).getTime());
+    return ts.length ? new Date(Math.min(...ts)) : null;
   })();
 
   const tierNote = (m) => (m ? `${m.tier === "cache" ? `cached ${m.age_h}h ago` : "fetched live"}` : "—");
@@ -724,6 +745,16 @@ export default function App() {
         <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderLeft: `3px solid ${banner.col}`, background: C.panel, borderRadius: 10, padding: "14px 18px" }}>
           <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 2, color: C.faint, marginBottom: 6 }}>OVERALL READ</div>
           <div style={{ fontSize: 15, color: banner.col, fontWeight: 500 }}>{banner.txt}</div>
+          {banner.jp && (
+            <div style={{ fontSize: 13.5, color: banner.jp.col, fontWeight: 500, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.line}` }}>
+              <span style={{ fontFamily: MONO, fontSize: 10.5, letterSpacing: 1.5, color: C.faint }}>JAPAN WATCH · </span>{banner.jp.txt}
+            </div>
+          )}
+          {bannerAsOf && (
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginTop: 8 }}>
+              read based on data fetched {bannerAsOf.toLocaleString()} (oldest of the source blocks)
+            </div>
+          )}
         </div>
 
         {/* per-lens summary — same aggregates and Japan override semantics as the banner above */}
@@ -762,10 +793,10 @@ export default function App() {
               ADDITIONAL WATCH · JAPAN CARRY TRADE <span style={{ letterSpacing: 0.5 }}>(override/amplifier — not averaged into the three lenses)</span>
             </div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start", padding: "8px 0 0" }}>
-              <Dot s={jpEff} />
+              <Dot s={jpM.eff} />
               <div style={{ flex: "1 1 200px", minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, color: dotColor(jpEff), marginTop: 3 }}>
-                  {(jpS.worst === "red" ? "Carry unwind in progress — Aug-2024-type shock risk." : jpS.worst === "amber" ? "Pressure building in the Japan channel." : jpS.worst === "green" ? "The carry trade is quiet — no unwind under way." : "No data.") + (jpS.cotUnwind ? " Early warning: yen shorts covering at historic speed." : "")}
+                <div style={{ fontSize: 12.5, color: dotColor(jpM.eff), marginTop: 3 }}>
+                  {jpM.txt}
                 </div>
               </div>
             </div>
