@@ -1,4 +1,8 @@
-// trilens-data v2026:07:02-22:22 — data backend for TriLens PWA
+// trilens-data v2026:09:16-09:58 — data backend for TriLens PWA
+// v09:58: adds ?ycchart=1y|5y|all — the yield-curve chart: FRED DGS10 (10y) & DGS3MO (3m) constant-maturity
+//   yields as two lines, date-aligned; spread = 10y − 3m (identical to the existing T10Y3M gauge, verified
+//   0.0000 max diff). Returns a COMPUTED 3-month (63 trading-day) spread change for the "approaching
+//   inversion" alert. Thresholds are the frozen Lens-1 gauge bands; nothing hardcoded.
 // v22:22: jp block gains `cot` — latest CFTC net spec JPY position + 4-week change + was_short flag,
 //   powering the amber-grade "early unwind warning" banner input (calibrated: 4w covering >= +60k off a
 //   short base = rarest ~1% of weeks since 1986; empirically LED the yen gauge before Aug 2007 and Aug 2024).
@@ -29,7 +33,7 @@
 // v14:14: date-aware AI prompt with staleness self-report (fixed year-old ISM release defect).
 // Tier 1: deterministic public APIs (FRED keyless CSV, Yahoo Finance, multpl scrape, CFTC, Japan MOF)
 // Tier 2: Claude + live web search ONLY for series with no free API
-// Tier 3: Supabase cache (det 6h / ai 24h / chart 6h / japan 6h / jpchart 12h). Anything unverifiable => null. Nothing estimated.
+// Tier 3: Supabase cache (det 6h / ai 24h / chart 6h / japan 6h / jpchart 12h / ycchart 6h). Anything unverifiable => null. Nothing estimated.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const CORS = {
@@ -38,7 +42,7 @@ const CORS = {
 };
 const UA = { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" };
 const DET_TTL_H = 6, AI_TTL_H = 24, CHART_TTL_H = 6, JP_TTL_H = 6, JPCHART_TTL_H = 12;
-const VERSION = "v2026:07:02-22:22";
+const VERSION = "v2026:09:16-09:58";
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
@@ -406,6 +410,50 @@ function sliceJpChart(full: { t: string[]; net: number[]; fx: (number | null)[];
   };
 }
 
+// ---------- yield-curve chart: FRED DGS10 (10y) & DGS3MO (3m), aligned; spread = T10Y3M ----------
+async function buildYcChartFull() {
+  const errors: string[] = [];
+  const grab = async (id: string) => { try { return await fredSeries(id); } catch (e) { errors.push(`${id}: ${(e as Error).message}`); return null; } };
+  const [d10, d3] = await Promise.all([grab("DGS10"), grab("DGS3MO")]);
+  if (!d10 || !d3) throw new Error("yield series unavailable (DGS10/DGS3MO)");
+  const m3 = new Map(d3.map((x) => [x.d, x.v]));
+  const t: string[] = [], y10: number[] = [], y3: number[] = [], spread: number[] = [];
+  for (const p of d10) {                       // d10 is date-ascending; keep only dates present in both
+    const v3 = m3.get(p.d);
+    if (v3 == null) continue;
+    t.push(p.d); y10.push(p.v); y3.push(v3); spread.push(+(p.v - v3).toFixed(2));
+  }
+  if (t.length < 70) throw new Error("insufficient aligned yield history");
+  const n = t.length;
+  // 3-month change in the spread over 63 trading days (the app's existing momentum convention)
+  const chg3m_bp = n > 63 ? +((spread[n - 1] - spread[n - 1 - 63]) * 100).toFixed(0) : null;
+  return {
+    t, y10, y3, spread,
+    trend: { chg_3m_bp: chg3m_bp },
+    latest: { d: t[n - 1], y10: y10[n - 1], y3: y3[n - 1], spread: spread[n - 1] },
+    coverage: { from: t[0], days: n },
+    src: "FRED DGS10 (10y) & DGS3MO (3m) constant-maturity; spread = 10y \u2212 3m (= T10Y3M), 3-month change over 63 trading days \u2014 all computed server-side",
+    errors,
+  };
+}
+function sliceYcChart(full: { t: string[]; y10: number[]; y3: number[]; spread: number[]; trend: unknown; latest: unknown; coverage: unknown; src: string; errors: string[] }, range: string) {
+  const n = full.t.length;
+  const spans: Record<string, { obs: number; step: number }> = {
+    "1y": { obs: 253, step: 1 }, "5y": { obs: 1265, step: 5 }, "all": { obs: n, step: 21 },
+  };
+  const sp = spans[range] || spans["1y"];
+  const start = Math.max(0, n - sp.obs);
+  const idx: number[] = [];
+  for (let i = start; i < n; i += sp.step) idx.push(i);
+  if (idx[idx.length - 1] !== n - 1) idx.push(n - 1);   // always include the latest reading
+  return {
+    t: idx.map((i) => full.t[i]), y10: idx.map((i) => full.y10[i]), y3: idx.map((i) => full.y3[i]), spread: idx.map((i) => full.spread[i]),
+    trend: full.trend, latest: full.latest, coverage: full.coverage, src: full.src, errors: full.errors,
+    sampled: sp.step === 1 ? "daily" : `every ${sp.step}th trading day`,
+    window_from: full.t[start],
+  };
+}
+
 // ---------- Tier 2: Claude + web search for API-less series ----------
 function aiPrompt() {
   const today = new Date().toISOString().slice(0, 10);
@@ -476,6 +524,24 @@ Deno.serve(async (req) => {
       tier = { tier: "live", fetched_at: new Date().toISOString() };
     }
     return new Response(JSON.stringify({ jchart: sliceJpChart(full, jchartRange), meta: { jchart: tier, version: VERSION } }), {
+      headers: { ...CORS, "content-type": "application/json" },
+    });
+  }
+
+  // Yield-curve chart endpoint (10y & 3m yields + computed spread trend) — independent, no AI cost
+  const ycchartRange = url.searchParams.get("ycchart");
+  if (ycchartRange) {
+    let full, tier;
+    const ycc = url.searchParams.get("refresh") === "1" ? null : await cacheGet("ycchart", CHART_TTL_H);
+    if (ycc) { full = ycc.payload; tier = { tier: "cache", fetched_at: ycc.fetched_at, age_h: ycc.age_h }; }
+    else {
+      try { full = await buildYcChartFull(); } catch (e) {
+        return new Response(JSON.stringify({ error: `ycchart build failed: ${(e as Error).message}` }), { status: 502, headers: { ...CORS, "content-type": "application/json" } });
+      }
+      await cacheSet("ycchart", full);
+      tier = { tier: "live", fetched_at: new Date().toISOString() };
+    }
+    return new Response(JSON.stringify({ ycchart: sliceYcChart(full, ycchartRange), meta: { ycchart: tier, version: VERSION } }), {
       headers: { ...CORS, "content-type": "application/json" },
     });
   }
