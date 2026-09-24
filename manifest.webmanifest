@@ -1,0 +1,14 @@
+{
+  "name": "TriLens — Recession & Market-Peak Monitor",
+  "short_name": "TriLens",
+  "description": "Three lenses on the next crash: recession risk, market-peak froth, price trend. Live-sourced, honestly labelled.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0B0E14",
+  "theme_color": "#0B0E14",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
