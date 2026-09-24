@@ -2,6 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 
 /*
   TriLens — Recession & Market-Peak Monitor (PWA)
+  v10:02: NEW yield-curve chart (Lens 1 companion) — 10-year (blue) & 3-month (gold) Treasury yields as two
+  lines with the gap shaded (red where inverted), fed by backend ?ycchart (FRED DGS10/DGS3MO). A state-
+  dependent INVERSION ALERT (inverted / approaching / flattening / steepening / stable) reuses the frozen
+  Lens-1 gauge bands + the app's 3-month momentum convention — no new thresholds, no banner/froth change.
+  v18:55: data as-of line moved from the Overall Read banner to directly beneath the FORCE FRESH READINGS
+  button, restyled amber. Wording changed "oldest" → "latest" AND the arithmetic changed with it
+  (Math.min → Math.max of the block fetch times) so the label never misstates what it shows. Per-block
+  staleness remains visible in the footer tierNote line and the AI STALE? badges.
   v13:40: (1) Overall Read shows its data as-of time — the OLDEST fetched_at across det/AI/Japan blocks
   (honest: server cache means render time ≠ data time). (2) Japan watch moved to its own JAPAN WATCH line
   in the banner. (3) One canonical jpMessage() now feeds the banner, Lens Summary AND the Japan section
@@ -27,7 +35,7 @@ import { useEffect, useMemo, useState } from "react";
   Thresholds are disclosed methodology, printed on every card.
 */
 
-const APP_VERSION = "v2026:07:04-13:40";
+const APP_VERSION = "v2026:09:23-22:37";
 const API = "https://pvqwpzbjremcyobnsldd.supabase.co/functions/v1/trilens-data";
 
 const C = {
@@ -372,8 +380,13 @@ function japanWorst(jp) {
   // Calibrated on the full 1986→ weekly distribution (~1% of weeks). Verified against history: this signal
   // fired BEFORE the yen gauge crossed amber ahead of both the Aug-2007 and Aug-2024 unwinds — but it also
   // fires in some benign covering episodes (2003, 2006, 2011), so it lifts green→amber only.
+  // Gate on the CURRENT net still being short (net < 0): once specs have flipped net LONG the carry is
+  // already unwound/discharged (the level reading), so the covering is complete — not an EARLY WARNING.
+  // This keeps the banner from contradicting the net-long "CARRY UNWOUND" Trend Conclusion. Verified from
+  // CFTC data: the 2007 & 2024 lead signals both fired while net was still short (2024-07-23 net −107,108;
+  // it flipped long only on 2024-08-13, after the crash), so the guard preserves every proven signal.
   const cot = jp?.cot;
-  const cotUnwind = !!(cot && typeof cot.chg_4w === "number" && cot.chg_4w >= 60000 && cot.was_short);
+  const cotUnwind = !!(cot && typeof cot.chg_4w === "number" && cot.chg_4w >= 60000 && cot.was_short && typeof cot.net === "number" && cot.net < 0);
   return { worst, cotUnwind };
 }
 
@@ -393,6 +406,154 @@ function jpMessage(jpS) {
 /* Carry-trade chart: CFTC CoT net non-commercial JPY futures position (weekly, 1986→) + USD/JPY.
    Net SHORT yen (below zero) = carry trade ON. Record short and latest are COMPUTED server-side
    from the full series — never hardcoded. Hand-rolled SVG, no new dependencies. */
+function YieldCurveChart() {
+  const [range, setRange] = useState("1y");
+  const [cache, setCache] = useState({});
+  const cur = cache[range] || { status: "idle" };
+
+  useEffect(() => {
+    if (cache[range]) return;
+    setCache((p) => ({ ...p, [range]: { status: "loading" } }));
+    fetch(`${API}?ycchart=${range}`)
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then((j) => setCache((p) => ({ ...p, [range]: j.error ? { status: "error", err: j.error } : { status: "done", data: j } })))
+      .catch((e) => setCache((p) => ({ ...p, [range]: { status: "error", err: e.message } })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range]);
+
+  const j = cur.data?.ycchart;
+  const W = 820, H = 300, m = { l: 52, r: 74, t: 16, b: 34 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+
+  let body = null, head = null, alertBox = null, disclosure = null;
+  if (j && j.t.length > 1) {
+    // INVERSION ALERT — level bands are the frozen Lens-1 gauge thresholds (green >= +0.25 / amber 0..0.25 /
+    // red < 0); direction uses the 3-month spread change (63 trading days). ±5bp/3mo is treated as flat.
+    // All inputs are live server-computed values; nothing hardcoded.
+    const sp = j.latest.spread, ch = j.trend?.chg_3m_bp;
+    const bpS = (v) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v)}bp`;
+    const nb = Math.round(sp * 100);
+    let cc;
+    if (sp < 0) cc = { txt: `INVERTED — the 10-year yields ${Math.abs(nb)}bp LESS than the 3-month. Every US recession since the 1960s has followed an inversion, on a ~12–18 month lag. The recession clock has started — watch for the re-steepening that has historically marked the downturn's onset.`, col: C.red };
+    else {
+      const flat = ch == null || Math.abs(ch) < 5;
+      if (!flat && ch < 0 && sp <= 0.25) cc = { txt: `APPROACHING INVERSION — the spread is just +${nb}bp and compressing (${bpS(ch)} over 3 months). Short and long yields are converging on the inversion line; the classic recession warning is close to firing. Watch closely.`, col: C.amber };
+      else if (!flat && ch < 0) cc = { txt: `FLATTENING — spread +${nb}bp but narrowing (${bpS(ch)} in 3 months). Moving toward inversion, still with room above the line. Not a warning yet, but this is the direction that precedes recessions.`, col: C.amber };
+      else if (!flat && ch > 0) cc = { txt: `STEEPENING — the spread rose ${bpS(ch)} over 3 months to +${nb}bp. The curve is moving AWAY from inversion; no recession signal is building here.`, col: C.green };
+      else cc = { txt: `STABLE — spread near +${nb}bp, little net change over the past quarter${ch != null ? ` (${bpS(ch)})` : ""}. ${sp >= 0.25 ? "Comfortably positive." : "Positive but thin — worth watching."}`, col: sp >= 0.25 ? C.green : C.amber };
+    }
+    alertBox = (
+      <div style={{ border: `1px solid ${C.line}`, borderLeft: `3px solid ${cc.col}`, background: C.panel, borderRadius: 8, padding: "10px 14px", margin: "4px 0 10px", fontSize: 13, color: cc.col, fontWeight: 500 }}>
+        <span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: 2, color: C.faint, display: "block", marginBottom: 4 }}>INVERSION ALERT</span>
+        {cc.txt}
+      </div>
+    );
+    head = (
+      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.text, marginBottom: 6 }}>
+        Spread (10y − 3m): <span style={{ color: cc.col, fontWeight: 600, fontSize: 19 }}>{sp > 0 ? "+" : ""}{sp.toFixed(2)}%</span> ({j.latest.d})
+        <span style={{ color: C.faint }}> · 10y {j.latest.y10.toFixed(2)}% · 3m {j.latest.y3.toFixed(2)}%{ch != null ? ` · 3-mo change ${bpS(ch)}` : ""}</span>
+      </div>
+    );
+
+    const { t, y10, y3, spread } = j;
+    const N = t.length;
+    const allv = [...y10, ...y3];
+    const loR = Math.min(...allv), hiR = Math.max(...allv);
+    const pad = (hiR - loR) * 0.12 || 0.2;
+    const lo = loR - pad, hi = hiR + pad;
+    const x = (i) => m.l + (i / (N - 1)) * pw;
+    const y = (v) => m.t + (1 - (v - lo) / (hi - lo)) * ph;
+    const p10 = y10.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+    const p3 = y3.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+    let band = `M${x(0).toFixed(1)},${y(y10[0]).toFixed(1)}`;
+    for (let i = 1; i < N; i++) band += `L${x(i).toFixed(1)},${y(y10[i]).toFixed(1)}`;
+    for (let i = N - 1; i >= 0; i--) band += `L${x(i).toFixed(1)},${y(y3[i]).toFixed(1)}`;
+    band += "Z";
+    const invPaths = [];
+    let run = -1;
+    for (let i = 0; i <= N; i++) {
+      const inv = i < N && spread[i] < 0;
+      if (inv && run < 0) run = i;
+      if ((!inv || i === N) && run >= 0) {
+        const a = run, b = i - 1;
+        let p = `M${x(a).toFixed(1)},${y(y10[a]).toFixed(1)}`;
+        for (let k = a + 1; k <= b; k++) p += `L${x(k).toFixed(1)},${y(y10[k]).toFixed(1)}`;
+        for (let k = b; k >= a; k--) p += `L${x(k).toFixed(1)},${y(y3[k]).toFixed(1)}`;
+        p += "Z"; invPaths.push(p); run = -1;
+      }
+    }
+    const yTicks = Array.from({ length: 5 }, (_, k) => lo + (k * (hi - lo)) / 4);
+    const xTickIdx = Array.from({ length: 6 }, (_, k) => Math.round((k * (N - 1)) / 5));
+    const xLabel = (d) => (range === "1y" ? `${MO[+d.slice(5, 7) - 1]} '${d.slice(2, 4)}` : d.slice(0, 4));
+
+    body = (
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="US Treasury yield curve: 10-year vs 3-month">
+        {yTicks.map((v, k) => (
+          <g key={k}>
+            <line x1={m.l} x2={W - m.r} y1={y(v)} y2={y(v)} stroke={C.line} strokeWidth="0.6" />
+            <text x={m.l - 8} y={y(v) + 3.5} textAnchor="end" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{v.toFixed(1)}%</text>
+          </g>
+        ))}
+        {xTickIdx.map((i, k) => (
+          <text key={k} x={x(i)} y={H - m.b + 26} textAnchor="middle" fontSize="10.5" fill={C.faint} fontFamily={MONO}>{xLabel(t[i])}</text>
+        ))}
+        <path d={band} fill={C.green} opacity="0.10" />
+        {invPaths.map((p, k) => <path key={k} d={p} fill={C.red} opacity="0.30" />)}
+        <path d={p3} fill="none" stroke={C.gold} strokeWidth="1.6" />
+        <path d={p10} fill="none" stroke={C.blue} strokeWidth="1.6" />
+        <circle cx={x(N - 1)} cy={y(y10[N - 1])} r="4" fill={C.blue} stroke={C.bg} strokeWidth="1.5" />
+        <circle cx={x(N - 1)} cy={y(y3[N - 1])} r="4" fill={C.gold} stroke={C.bg} strokeWidth="1.5" />
+        <text x={W - m.r + 8} y={y(y10[N - 1]) + 3.5} textAnchor="start" fontSize="10.5" fill={C.blue} fontFamily={MONO}>10y {y10[N - 1].toFixed(2)}</text>
+        <text x={W - m.r + 8} y={y(y3[N - 1]) + 3.5} textAnchor="start" fontSize="10.5" fill={C.gold} fontFamily={MONO}>3m {y3[N - 1].toFixed(2)}</text>
+      </svg>
+    );
+    disclosure = (
+      <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.faint, marginTop: 6, lineHeight: 1.7 }}>
+        {j.sampled} · 10y = FRED DGS10, 3m = FRED DGS3MO (constant maturity) · spread = 10y − 3m (= FRED T10Y3M) · red band = inverted (3m above 10y) · coverage from {j.coverage.from} ({j.coverage.days} days)
+        <br />alert bands are the frozen Lens-1 gauge thresholds (green ≥ +0.25 · amber 0 to +0.25 · red below 0); 3-month change over 63 trading days; changes within ±5bp/3mo treated as flat — all computed from the series, never hardcoded
+        <br />src: {j.src}
+        {j.errors?.length > 0 && <span style={{ color: C.amber }}> · warnings: {j.errors.join(" · ")}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: C.panelSoft, border: `1px solid ${C.line}`, borderRadius: 10, padding: "14px 14px 10px", marginTop: 10 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ fontWeight: 600, fontSize: 14.5, marginRight: 6 }}>The Yield Curve, Measured <span style={{ color: C.faint, fontWeight: 400, fontSize: 12.5 }}>(10-year vs 3-month Treasury)</span></div>
+        {["1y", "5y", "all"].map((r) => (
+          <button key={r} onClick={() => setRange(r)}
+            style={{ background: range === r ? C.blue : "transparent", color: range === r ? "#0B0E14" : C.mute, border: `1px solid ${range === r ? C.blue : C.line}`, borderRadius: 6, padding: "4px 12px", fontFamily: MONO, fontSize: 11, fontWeight: 600, cursor: "pointer", letterSpacing: 1 }}>
+            {r.toUpperCase()}
+          </button>
+        ))}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12, fontFamily: MONO, fontSize: 9.5, color: C.mute }}>
+          <span><span style={{ color: C.blue }}>—</span> 10-year</span>
+          <span><span style={{ color: C.gold }}>—</span> 3-month</span>
+          <span><span style={{ color: C.red }}>■</span> inverted</span>
+        </div>
+      </div>
+      {head}
+      {alertBox}
+      {cur.status === "loading" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 24, color: C.mute, fontSize: 13 }}>
+          <span style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${C.line}`, borderTopColor: C.blue, display: "inline-block", animation: "spin .8s linear infinite" }} />
+          Loading Treasury yield history…
+        </div>
+      )}
+      {cur.status === "error" && (
+        <div style={{ color: C.red, fontSize: 13, padding: 12 }}>
+          Yield-curve chart failed: {cur.err}{" "}
+          <button onClick={() => setCache((p) => { const q = { ...p }; delete q[range]; return q; })}
+            style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button>
+        </div>
+      )}
+      {body}
+      {disclosure}
+    </div>
+  );
+}
+
 function JapanCarryChart() {
   const [range, setRange] = useState("5y");
   const [cache, setCache] = useState({});
@@ -697,11 +858,14 @@ export default function App() {
     return { txt, col, jp: { txt: jpM.txt, col: dotColor(jpM.eff) } };
   })();
 
-  // Honest banner timestamp: the OLDEST fetched_at among the blocks feeding the read — server-side
-  // cache means data time ≠ render time; the weakest link defines the read's freshness.
+  // Data as-of line: the LATEST fetched_at among the blocks feeding the read. Server-side cache means
+  // data time ≠ render time, so this is a real fetch timestamp, never Date.now(). The label says "latest"
+  // and the maths takes the max — the two must always agree. Blocks have different TTLs (det 6h / ai 24h /
+  // japan 6h), so a block can be older than this line: per-block ages stay in the footer tierNote, and
+  // stale AI series keep their STALE? badge.
   const bannerAsOf = (() => {
     const ts = [meta?.det, meta?.ai, meta?.jp].filter((m) => m && m.fetched_at).map((m) => new Date(m.fetched_at).getTime());
-    return ts.length ? new Date(Math.min(...ts)) : null;
+    return ts.length ? new Date(Math.max(...ts)) : null;
   })();
 
   const tierNote = (m) => (m ? `${m.tier === "cache" ? `cached ${m.age_h}h ago` : "fetched live"}` : "—");
@@ -736,6 +900,12 @@ export default function App() {
           </button>
         </div>
 
+        {bannerAsOf && (
+          <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.amber, marginTop: 10 }}>
+            read based on data fetched {bannerAsOf.toLocaleString()} (latest of the source blocks)
+          </div>
+        )}
+
         <div style={{ fontFamily: MONO, fontSize: 10, color: C.faint, marginTop: 10, lineHeight: 1.7 }}>
           {APP_VERSION} · backend {meta?.version || "—"} · public APIs: {tierNote(meta?.det)} · AI web-search block: {tierNote(meta?.ai)}
           {state.err && <span style={{ color: C.red }}> · last request failed: {state.err}</span>}
@@ -748,11 +918,6 @@ export default function App() {
           {banner.jp && (
             <div style={{ fontSize: 13.5, color: banner.jp.col, fontWeight: 500, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.line}` }}>
               <span style={{ fontFamily: MONO, fontSize: 10.5, letterSpacing: 1.5, color: C.faint }}>JAPAN WATCH · </span>{banner.jp.txt}
-            </div>
-          )}
-          {bannerAsOf && (
-            <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginTop: 8 }}>
-              read based on data fetched {bannerAsOf.toLocaleString()} (oldest of the source blocks)
             </div>
           )}
         </div>
@@ -850,6 +1015,10 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* LENS 1 · YIELD CURVE CHART */}
+            <SectionHead label="Lens 1 · Yield Curve" title="Are short and long rates converging toward inversion?" desc="The 10-year and 3-month Treasury yields, and the spread between them — the earliest reliable recession lead-time signal." />
+            <YieldCurveChart />
 
             {/* LENS 2 */}
             <SectionHead label="Lens 2 · Market-Peak Froth" title="Does positioning look like a top?" desc="A signal is triggered when it shows the euphoria or complacency typical of market tops." />

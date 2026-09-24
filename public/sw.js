@@ -2,7 +2,7 @@
 // POLICY: app shell is cached for offline launch; the trilens-data API is NEVER
 // cached here. Freshness/caching of readings is handled server-side with
 // labelled tiers so the UI can always tell the truth about data age.
-const CACHE = "trilens-shell-v2026-07-04-1340";
+const CACHE = "trilens-shell-v2026-09-23-2237";
 
 self.addEventListener("install", (e) => {
   self.skipWaiting();
